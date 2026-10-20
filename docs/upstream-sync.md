@@ -71,6 +71,7 @@ Stellar Engine keeps these changes on top of the upstream modules. Each sync pre
 | `datafusion`, `datafusion-se` | The instance logs with all metadata, and the copy carries a Stellar Engine implementation. |
 | `gke-cluster-standard`, `gke-cluster-autopilot` | The control plane public endpoint stays disabled unless a caller enables it. |
 | `gke-cluster-standard-se` | Every cluster registers with a fleet, by default in its own project. |
+| `gke-cluster-standard`, `gke-cluster-standard-se` | Shielded GKE Nodes default to on. |
 | `pubsub` | The module keeps the `name` output. |
 | `net-vpc-peering` | Variable descriptions are more detailed. |
 
