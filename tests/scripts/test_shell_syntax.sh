@@ -32,7 +32,7 @@ while IFS= read -r -d '' script; do
     bash -n "$script" || true
     FAILED=$((FAILED + 1))
   fi
-done < <(find "${REPO_ROOT}" -type f -name "*.sh" -not -path "*/.git/*" -not -path "*/.terraform/*" -print0)
+done < <(find "${REPO_ROOT}" -type f -name "*.sh" -not -path "*/.git/*" -not -path "*/.terraform/*" -not -path "*/.venv/*" -not -path "*/venv/*" -not -path "*/node_modules/*" -not -path "*/__pycache__/*" -print0)
 
 echo ""
 echo "Summary: ${TOTAL} shell scripts checked, ${FAILED} failures."

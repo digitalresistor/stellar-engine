@@ -48,7 +48,7 @@ def check_file(path):
 
 count = 0
 for root, dirs, files in os.walk('${REPO_ROOT}'):
-  dirs[:] = [d for d in dirs if d not in ('.git', '.terraform', '__pycache__')]
+  dirs[:] = [d for d in dirs if d not in ('.git', '.terraform', '.venv', 'venv', 'node_modules', '__pycache__')]
   for fname in files:
     if fname.endswith('.py'):
       fpath = os.path.join(root, fname)
