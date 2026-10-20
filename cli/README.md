@@ -66,8 +66,11 @@ Preflight follows the order of the DDG prerequisites section.
 - Terraform meets the highest `required_version` floor that the modules under
   `modules/` declare, and the Google Cloud SDK and jq are installed.
 - The active gcloud account matches the Application Default Credentials
-  identity that Terraform uses, and that identity is a user account because
-  Stage 0 grants `bootstrap_user` as a `user:` principal.
+  identity that Terraform uses.
+- A user account is available for the `bootstrap_user` variable, because
+  Stage 0 grants it as a `user:` principal. The signed-in user serves by
+  default, and the `--bootstrap-user` flag names another user when
+  Terraform runs as a service account.
 - The active gcloud project is the bootstrap project.
 - The organization exists, and its domain and directory customer ID match the
   values you pass.
@@ -105,9 +108,10 @@ already include.
   Resource Manager, IAM, Cloud Billing, Service Usage, Cloud Identity, Cloud
   Logging, and Organization Policy APIs enabled.
 - A disabled API reports the exact `gcloud services enable` command to run.
-- A service account identity fails the user account check, and the
-  `--allow-service-account` flag downgrades that failure to a warning for
-  test environments.
+- Terraform can run as a service account, because Stage 0 only needs a user
+  account for the `bootstrap_user` variable. Pass that user's email with the
+  `--bootstrap-user` flag, and use the same value for
+  `-var bootstrap_user` on the first Stage 0 apply.
 - The `--redeploy` flag downgrades existing prefix resources to warnings when
   you rerun preflight against your own earlier deployment.
 

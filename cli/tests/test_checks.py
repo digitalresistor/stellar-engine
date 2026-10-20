@@ -28,6 +28,9 @@ def by_id(results):
     return {item.check_id: item for item in results}
 
 
+SA = "sa@example-project.iam.gserviceaccount.com"
+
+
 def remedy(item):
     return item.remedy or ""
 
@@ -77,33 +80,44 @@ class TestIdentity:
         assert found["identity.gcloud"] == Status.FAIL
         assert "identity.match" not in found
 
-    def test_service_account_fails(self, make_ctx, cloud, local_tools):
-        email = "sa@example-project.iam.gserviceaccount.com"
-        cloud.principal = api.Principal(
-            email, api.PrincipalKind.SERVICE_ACCOUNT
-        )
-        local_tools.account = email
+    def test_user_is_default_bootstrap_user(self, make_ctx):
         found = by_id(checks.check_identity(make_ctx()))
-        assert found["identity.user"].status == Status.FAIL
-        assert "bootstrap_user" in found["identity.user"].detail
+        bootstrap = found["identity.bootstrap_user"]
+        assert bootstrap.status == Status.PASS
+        assert f"-var bootstrap_user={conftest.USER}" in bootstrap.detail
 
-    def test_service_account_allowed_warns(self, make_ctx, cloud, local_tools):
-        email = "sa@example-project.iam.gserviceaccount.com"
-        cloud.principal = api.Principal(
-            email, api.PrincipalKind.SERVICE_ACCOUNT
-        )
-        local_tools.account = email
-        found = statuses(
-            checks.check_identity(make_ctx(allow_service_account=True))
-        )
-        assert found["identity.user"] == Status.WARN
+    def test_service_account_without_bootstrap_user_fails(
+        self, make_ctx, cloud, local_tools
+    ):
+        cloud.principal = api.Principal(SA, api.PrincipalKind.SERVICE_ACCOUNT)
+        local_tools.account = SA
+        found = by_id(checks.check_identity(make_ctx()))
+        bootstrap = found["identity.bootstrap_user"]
+        assert bootstrap.status == Status.FAIL
+        assert "--bootstrap-user" in remedy(bootstrap)
+
+    def test_service_account_with_bootstrap_user_passes(
+        self, make_ctx, cloud, local_tools
+    ):
+        cloud.principal = api.Principal(SA, api.PrincipalKind.SERVICE_ACCOUNT)
+        local_tools.account = SA
+        ctx = make_ctx(bootstrap_user="admin@example.com")
+        bootstrap = by_id(checks.check_identity(ctx))["identity.bootstrap_user"]
+        assert bootstrap.status == Status.PASS
+        assert "-var bootstrap_user=admin@example.com" in bootstrap.detail
+        assert f"Terraform runs as {SA}" in bootstrap.detail
+
+    def test_service_account_as_bootstrap_user_fails(self, make_ctx):
+        ctx = make_ctx(bootstrap_user=SA)
+        bootstrap = by_id(checks.check_identity(ctx))["identity.bootstrap_user"]
+        assert bootstrap.status == Status.FAIL
 
     def test_missing_credentials(self, make_ctx, cloud):
         cloud.principal = api.CredentialsError("no ADC")
         found = by_id(checks.check_identity(make_ctx()))
         assert found["identity.adc"].status == Status.FAIL
         assert "application-default login" in remedy(found["identity.adc"])
-        assert "identity.user" not in found
+        assert "identity.bootstrap_user" not in found
 
     def test_impersonation_warns(self, make_ctx):
         environ = {"GOOGLE_IMPERSONATE_SERVICE_ACCOUNT": "x@y.iam.com"}
@@ -173,6 +187,11 @@ class TestIamRoles:
         assert found["iam.roles/owner"].status == Status.FAIL
         assert "setIAM.sh" in remedy(found["iam.roles/owner"])
 
+    def test_singular_permission_wording(self, make_ctx, cloud):
+        found = by_id(checks.check_iam_roles(resolved(make_ctx)))
+        detail = found["iam.roles/owner"].detail
+        assert "holds the only testable permission on" in detail
+
     def test_untestable_role_warns(self, make_ctx, cloud):
         cloud.org_testable = set()
         found = statuses(
@@ -225,8 +244,20 @@ class TestBilling:
 
     def test_missing_account(self, make_ctx, cloud):
         cloud.billing_account = None
-        found = statuses(checks.check_billing(make_ctx()))
-        assert found["billing.account"] == Status.FAIL
+        found = by_id(checks.check_billing(make_ctx()))
+        assert found["billing.account"].status == Status.FAIL
+        assert "gcloud billing accounts list" in remedy(
+            found["billing.account"]
+        )
+
+    def test_unreadable_account_has_no_id_hint(self, make_ctx, cloud):
+        cloud.billing_account = api.ApiDisabledError(
+            "cloudbilling.googleapis.com", "123"
+        )
+        account = by_id(checks.check_billing(make_ctx()))["billing.account"]
+        assert account.status == Status.FAIL
+        assert "gcloud services enable cloudbilling" in account.detail
+        assert account.remedy is None
 
     def test_project_on_other_account(self, make_ctx, cloud):
         cloud.project_link = api.ProjectBilling("111111-222222-333333", True)
@@ -483,6 +514,20 @@ class TestSharedOrg:
         iam = by_id(checks.check_shared_org(ctx))["shared.iam"]
         assert (iam.status == Status.WARN) is removed
         assert (member in iam.detail) is removed
+
+    def test_named_bootstrap_user_is_kept(self, make_ctx, cloud):
+        cloud.principal = api.Principal(SA, api.PrincipalKind.SERVICE_ACCOUNT)
+        cloud.bindings = [
+            api.IamBinding(
+                "roles/resourcemanager.organizationAdmin",
+                ("user:admin@example.com", f"serviceAccount:{SA}"),
+            )
+        ]
+        ctx = resolved(make_ctx, bootstrap_user="admin@example.com")
+        checks.check_identity(ctx)
+        iam = by_id(checks.check_shared_org(ctx))["shared.iam"]
+        assert "admin@example.com" not in iam.detail
+        assert SA in iam.detail
 
     def test_policy_denied_warns(self, make_ctx, cloud):
         cloud.bindings = api.AccessDeniedError("nope")

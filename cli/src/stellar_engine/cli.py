@@ -116,6 +116,16 @@ def preflight(
             envvar="STELLAR_CUSTOMER_ID", help="Directory customer ID."
         ),
     ] = None,
+    bootstrap_user: Annotated[
+        str | None,
+        typer.Option(
+            envvar="STELLAR_BOOTSTRAP_USER",
+            help=(
+                "User account email for the first Stage 0 apply's "
+                "bootstrap_user. Defaults to the signed-in user."
+            ),
+        ),
+    ] = None,
     group: Annotated[
         list[str] | None,
         typer.Option(
@@ -133,13 +143,6 @@ def preflight(
             dir_okay=False,
         ),
     ] = None,
-    allow_service_account: Annotated[
-        bool,
-        typer.Option(
-            "--allow-service-account",
-            help="Report a service account identity as WARN, not FAIL.",
-        ),
-    ] = False,
     redeploy: Annotated[
         bool,
         typer.Option(
@@ -174,7 +177,7 @@ def preflight(
         "domain": domain,
         "customer_id": customer_id,
         "groups": _parse_groups(group),
-        "allow_service_account": allow_service_account,
+        "bootstrap_user": bootstrap_user,
         "redeploy": redeploy,
     }
     err_console = rich_console.Console(stderr=True)

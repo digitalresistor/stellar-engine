@@ -44,6 +44,7 @@ DOC_IAM = "docs/prerequisites.md#initial-iam-grants"
 DOC_GROUPS = "docs/prerequisites.md#administrative-groups"
 DOC_FEATURES = "docs/prerequisites.md#organization-features-and-quotas"
 DOC_TROUBLESHOOTING = "docs/ddg.md#appendices"
+DDG_STAGE0 = "docs/ddg.md#stage-0---bootstrap"
 
 # DDG prerequisite that enableServices.sh does not cover yet.
 EXTRA_APIS = ("monitoring.googleapis.com",)
@@ -53,6 +54,7 @@ IMPERSONATION_ENV_VARS = (
     "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
 )
 _SCHEME_RE = re.compile(r"^[a-zA-Z]+:")
+_SA_EMAIL_SUFFIX = ".gserviceaccount.com"
 _PREFIX_RE = re.compile(r"^[a-z](?:[a-z0-9-]*[a-z0-9])?$")
 _REGION_RE = re.compile(r"^us-[a-z]+[0-9]+$")
 _MAX_LISTED = 10
@@ -228,35 +230,7 @@ def check_identity(ctx):
                 doc=DOC_WORKSTATION,
             )
         )
-    if principal.kind == api.PrincipalKind.SERVICE_ACCOUNT:
-        status = (
-            Status.WARN if ctx.inputs.allow_service_account else Status.FAIL
-        )
-        results.append(
-            CheckResult(
-                "identity.user",
-                Category.IDENTITY,
-                "Deploying identity is a user",
-                status,
-                (
-                    f"{principal.email} is a service account. Stage 0 grants "
-                    "`bootstrap_user` as a `user:` principal, so the first "
-                    "apply needs a user account."
-                ),
-                remedy="Sign in with a user account that has the DDG roles.",
-                doc=DDG_PREREQUISITES,
-            )
-        )
-    elif principal.kind == api.PrincipalKind.USER:
-        results.append(
-            CheckResult(
-                "identity.user",
-                Category.IDENTITY,
-                "Deploying identity is a user",
-                Status.PASS,
-                f"{principal.email} is a user account.",
-            )
-        )
+    results.append(_bootstrap_user_result(ctx))
     project = ctx.inputs.bootstrap_project
     active_project = ctx.tools.gcloud_project()
     if project and active_project != project:
@@ -302,6 +276,81 @@ def check_identity(ctx):
         )
     )
     return results
+
+
+def bootstrap_user(ctx):
+    """Returns the user that the first Stage 0 apply grants as bootstrap_user.
+
+    The operator can name any user account. Without one, the Application
+    Default Credentials identity serves when it is a user account.
+    """
+    if ctx.inputs.bootstrap_user:
+        return ctx.inputs.bootstrap_user
+    principal = ctx.principal
+    if principal and principal.kind == api.PrincipalKind.USER:
+        return principal.email
+    return None
+
+
+def _bootstrap_user_result(ctx):
+    """Checks that the first Stage 0 apply has a user for bootstrap_user.
+
+    Stage 0 binds `user:<bootstrap_user>`, so the value must be a user
+    account. Terraform itself may run as a service account.
+    """
+    principal = ctx.principal
+    configured = ctx.inputs.bootstrap_user
+    runs_as = (
+        f" Terraform runs as {principal.email}."
+        if principal and principal.email and principal.email != configured
+        else ""
+    )
+    common = {
+        "check_id": "identity.bootstrap_user",
+        "category": Category.IDENTITY,
+        "title": "Bootstrap user",
+        "doc": DDG_STAGE0,
+    }
+    if configured and configured.endswith(_SA_EMAIL_SUFFIX):
+        return CheckResult(
+            status=Status.FAIL,
+            detail=(
+                f"{configured} is a service account, but Stage 0 grants "
+                "`bootstrap_user` as a `user:` principal."
+            ),
+            remedy="Pass --bootstrap-user with a user account email.",
+            **common,
+        )
+    user = bootstrap_user(ctx)
+    if user:
+        return CheckResult(
+            status=Status.PASS,
+            detail=(
+                f"Pass `-var bootstrap_user={user}` on the first Stage 0 "
+                f"apply.{runs_as}"
+            ),
+            **common,
+        )
+    if principal and principal.kind == api.PrincipalKind.SERVICE_ACCOUNT:
+        return CheckResult(
+            status=Status.FAIL,
+            detail=(
+                f"Terraform runs as the service account {principal.email}, "
+                "and Stage 0 needs a user account as `bootstrap_user`."
+            ),
+            remedy=(
+                "Pass --bootstrap-user with a user account email, and use "
+                "the same value for `-var bootstrap_user` on the first "
+                "Stage 0 apply."
+            ),
+            **common,
+        )
+    return CheckResult(
+        status=Status.WARN,
+        detail="The bootstrap user cannot be determined.",
+        remedy="Pass --bootstrap-user with a user account email.",
+        **common,
+    )
 
 
 def check_organization(ctx):
@@ -392,6 +441,11 @@ def check_organization(ctx):
     return results
 
 
+def _count(items, noun):
+    """Returns a count with a singular or plural noun, like `1 permission`."""
+    return f"{len(items)} {noun}{'' if len(items) == 1 else 's'}"
+
+
 def _role_result(role, testable, granted, scope):
     missing = sorted(testable - granted)
     if not testable:
@@ -410,8 +464,8 @@ def _role_result(role, testable, granted, scope):
             Category.IAM,
             role,
             Status.FAIL,
-            f"Missing {len(missing)} of {len(testable)} permissions on the "
-            f"{scope}, including {_listed(missing[:3])}.",
+            f"Missing {len(missing)} of {_count(testable, 'permission')} on "
+            f"the {scope}, including {_listed(missing[:3])}.",
             remedy=(
                 "Grant the role at the organization level, for example with "
                 "`fast/stages-aw/0-bootstrap/setIAM.sh <email> <org_id>`."
@@ -423,7 +477,13 @@ def _role_result(role, testable, granted, scope):
         Category.IAM,
         role,
         Status.PASS,
-        f"All {len(testable)} testable permissions are granted on the {scope}.",
+        "The deploying identity holds "
+        + (
+            "the only testable permission"
+            if len(testable) == 1
+            else f"all {len(testable)} testable permissions"
+        )
+        + f" on the {scope}.",
         doc=DOC_IAM,
     )
 
@@ -516,10 +576,14 @@ def check_billing(ctx):
                 "--billing-account",
             )
         ]
+    # The ID hint only helps when the lookup worked; a failed lookup already
+    # explains its own fix in the detail.
+    remedy = "Check the ID with `gcloud billing accounts list`."
     try:
         account = ctx.cloud.get_billing_account(account_id)
     except api.CloudError as error:
-        account, detail = None, f"Access denied: {error}"
+        account, remedy = None, None
+        detail = f"Cannot read billing account {account_id}: {error}"
     else:
         detail = f"Billing account {account_id} does not exist."
     if account is None or not account.is_open:
@@ -532,7 +596,7 @@ def check_billing(ctx):
                 "Billing account",
                 Status.FAIL,
                 detail,
-                remedy="Check the ID with `gcloud billing accounts list`.",
+                remedy=remedy,
                 doc=DOC_BOOTSTRAP,
             )
         ]
@@ -892,7 +956,6 @@ def check_naming(ctx):
 def _holder_member(ctx, holder, groups):
     """Resolves a Stage 0 role holder to the IAM member it grants."""
     prefix = ctx.inputs.prefix
-    principal = ctx.principal
     match holder.kind:
         case repo_lib.HolderKind.GROUP:
             return groups.get(holder.key)
@@ -901,10 +964,8 @@ def _holder_member(ctx, holder, groups):
                 f"serviceAccount:{prefix}-prod-{holder.key}@"
                 f"{prefix}-prod-iac-core-0.iam.gserviceaccount.com"
             )
-        case repo_lib.HolderKind.BOOTSTRAP_USER if (
-            principal and principal.kind == api.PrincipalKind.USER
-        ):
-            return f"user:{principal.email}"
+        case repo_lib.HolderKind.BOOTSTRAP_USER if bootstrap_user(ctx):
+            return f"user:{bootstrap_user(ctx)}"
         case repo_lib.HolderKind.DOMAIN if ctx.domain:
             return f"domain:{ctx.domain}"
     return None

@@ -58,8 +58,10 @@ class PreflightInputs(pydantic.BaseModel):
     region: str | None = None
     domain: str | None = None
     customer_id: str | None = None
+    bootstrap_user: str | None = pydantic.Field(
+        default=None, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+    )
     groups: dict[str, str] = pydantic.Field(default_factory=dict)
-    allow_service_account: bool = False
     redeploy: bool = False
 
 

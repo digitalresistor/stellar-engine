@@ -146,3 +146,15 @@ def test_config_env(runner, fake_cloud, tmp_path):
     document = json.loads(runner.invoke(cli.app, args).stdout)
     assert document["inputs"]["prefix"] == "fromenv"
     assert document["inputs"]["region"] == "us-west1"
+
+
+def test_service_account_with_bootstrap_user(runner, fake_cloud):
+    sa = "sa@example-project.iam.gserviceaccount.com"
+    fake_cloud.principal = conftest.api.Principal(
+        sa, conftest.api.PrincipalKind.SERVICE_ACCOUNT
+    )
+    args = [*BASE_ARGS, "--json", "--bootstrap-user", "admin@example.com"]
+    document = json.loads(runner.invoke(cli.app, args).stdout)
+    checks_by_id = {c["check_id"]: c for c in document["checks"]}
+    assert checks_by_id["identity.bootstrap_user"]["status"] == "pass"
+    assert document["inputs"]["bootstrap_user"] == "admin@example.com"
