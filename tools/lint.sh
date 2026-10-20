@@ -23,6 +23,9 @@ python3 tools/check_boilerplate.py "$PWD"
 echo -- Terraform format --
 terraform fmt -recursive -check -diff "$PWD"
 
+echo -- Terraform lint --
+bash tools/tflint.sh -f compact
+
 echo -- READMEs --
 python3 tools/check_documentation.py --no-show-summary modules fast blueprints
 

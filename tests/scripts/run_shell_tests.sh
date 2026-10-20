@@ -25,6 +25,8 @@ bash "${SCRIPT_DIR}/test_shell_syntax.sh"
 echo ""
 bash "${SCRIPT_DIR}/test_common_functions.sh"
 echo ""
+bash "${SCRIPT_DIR}/test_tflint.sh"
+echo ""
 
 echo "============================================================"
 echo " All shell script test suites PASSED successfully."
