@@ -12,7 +12,7 @@ This module manages the creation of a Cloud Scheduler Job
 ## Example Usage
 ### PubSub Job
 ```hcl
-module "pubsub_job" {
+module "pubsub-job" {
   source      = "../../../modules/cloud-scheduler"
   name        = "name"
   description = "description"
@@ -30,7 +30,7 @@ module "pubsub_job" {
 ### HTTP Job
 
 ```hcl
-module "http_job" {
+module "http-job" {
   source      = "../../../modules/cloud-scheduler"
   name        = "name"
   description = "description"
