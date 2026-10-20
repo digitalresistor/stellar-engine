@@ -113,6 +113,76 @@ def test_authoritative_roles(repo):
     assert "roles/orgpolicy.policyAdmin" not in roles
 
 
+def test_conditional_bindings_keep_their_holders(repo):
+    bindings = repo.authoritative_bindings()
+    assert (
+        repo_lib.Holder(repo_lib.HolderKind.DOMAIN)
+        in (bindings["roles/browser"])
+    )
+    assert (
+        repo_lib.Holder(repo_lib.HolderKind.BOOTSTRAP_USER)
+        in (bindings["roles/logging.admin"])
+    )
+
+
+def _write_stage0(root, organization_iam):
+    bootstrap = root / repo_lib.BOOTSTRAP_DIR
+    bootstrap.mkdir(parents=True)
+    (bootstrap / "automation.tf").write_text(
+        'module "automation-project" { source = "x"\n name = "iac-core-0" }\n'
+        'module "automation-tf-bootstrap-sa" {\n'
+        '  source = "x"\n  iam = { "roles/x" = [] }\n  name = "bootstrap-0"\n'
+        "}\n"
+    )
+    (bootstrap / "organization-iam.tf").write_text(organization_iam)
+    module = root / "modules/project"
+    module.mkdir(parents=True)
+    (module / "versions.tf").write_text(
+        'terraform { required_version = ">= 1.11.0, < 2.0.0" }\n'
+    )
+    return repo_lib.Repo(root)
+
+
+def test_parsing_ignores_layout(tmp_path):
+    fake = _write_stage0(
+        tmp_path,
+        "locals {\n"
+        '  iam_delete_roles = ["roles/billing.creator"]\n'
+        "  iam_sa_bindings = { (module.automation-tf-bootstrap-sa.iam_email)"
+        ' = { additive = [], authoritative = ["roles/owner"] } }\n'
+        "  iam_user_bootstrap_bindings = var.bootstrap_user == null ? {} : {\n"
+        '    "user:${var.bootstrap_user}" = {\n'
+        "      authoritative = [\n"
+        '        "roles/logging.admin"]\n'
+        "    }\n"
+        "  }\n"
+        "}\n",
+    )
+    assert fake.automation_service_accounts() == {
+        "automation-tf-bootstrap-sa": "bootstrap-0"
+    }
+    assert fake.authoritative_bindings() == {
+        "roles/billing.creator": set(),
+        "roles/logging.admin": {
+            repo_lib.Holder(repo_lib.HolderKind.BOOTSTRAP_USER)
+        },
+        "roles/owner": {
+            repo_lib.Holder(repo_lib.HolderKind.SERVICE_ACCOUNT, "bootstrap-0")
+        },
+    }
+    assert fake.min_terraform_version() == "1.11.0"
+
+
+def test_unknown_principal_raises(tmp_path):
+    fake = _write_stage0(
+        tmp_path,
+        'locals {\n  iam_x_bindings = { "group:x@example.com" = {'
+        ' authoritative = ["roles/owner"] } }\n}\n',
+    )
+    with pytest.raises(repo_lib.RepoError, match="Unknown principal"):
+        fake.authoritative_bindings()
+
+
 def test_min_terraform_version(repo):
     floor = repo.min_terraform_version()
     assert re.fullmatch(r"\d+\.\d+\.\d+", floor)

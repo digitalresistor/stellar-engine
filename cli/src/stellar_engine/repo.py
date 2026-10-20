@@ -38,18 +38,18 @@ _PREFIX_LIMIT_RE = re.compile(r"length\(var\.prefix\),\s*0\)\s*<=\s*(\d+)")
 _GROUP_DEFAULT_RE = re.compile(
     r'([\w-]+)\s*=\s*optional\(string,\s*"([^"]+)"\)'
 )
-_HOLDER_RE = re.compile(
-    r"(\(local\.principals\.(?P<group>[\w-]+)\)"
-    r"|\(module\.(?P<module>[\w-]+)\.iam_email\)"
-    r'|"(?P<user>user):\$\{var\.bootstrap_user\}"'
-    r'|"(?P<domain>domain):\$\{var\.organization\.domain\}")'
-    r"\s*=\s*\{\s*authoritative\s*=\s*\[(?P<roles>[^\]]*)\]"
+# python-hcl2 returns a conditional such as `cond ? {} : { ... }` as one
+# expression string, so the map literal in its else branch is parsed again.
+_CONDITIONAL_MAP_RE = re.compile(
+    r"^\$\{.*?\?\s*\{\}\s*:\s*(\{.*\})\}$", re.DOTALL
 )
-_DELETE_ROLES_RE = re.compile(r"iam_delete_roles\s*=\s*\[([^\]]*)\]")
-_MODULE_RE = re.compile(r'^module "([\w-]+)" \{')
-_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"')
-_ROLE_RE = re.compile(r'"(roles/[^"]+)"')
-_REQUIRED_VERSION_RE = re.compile(r'required_version\s*=\s*">=\s*([0-9.]+)"')
+_HOLDER_KEY_RE = re.compile(
+    r"^(?:\$\{\(local\.principals\.(?P<group>[\w-]+)\)\}"
+    r"|\$\{\(module\.(?P<module>[\w-]+)\.iam_email\)\}"
+    r"|(?P<user>user):\$\{var\.bootstrap_user\}"
+    r"|(?P<domain>domain):\$\{var\.organization\.domain\})$"
+)
+_VERSION_FLOOR_RE = re.compile(r">=\s*([0-9.]+)")
 
 
 class RepoError(Exception):
@@ -84,6 +84,25 @@ def _unquote(value):
     if isinstance(value, str) and value.startswith('"') and value.endswith('"'):
         return json.loads(value)
     return value
+
+
+def _load_hcl(path):
+    with path.open(encoding="utf-8") as handle:
+        return hcl2.load(handle)
+
+
+def _literal_map(value, name):
+    """Returns a parsed HCL map, unwrapping a `cond ? {} : {...}` value.
+
+    Raises:
+        RepoError: If the value is neither a map nor that conditional.
+    """
+    if isinstance(value, dict):
+        return value
+    match = _CONDITIONAL_MAP_RE.match(value) if isinstance(value, str) else None
+    if not match:
+        raise RepoError(f"Cannot read local.{name} as a map")
+    return hcl2.loads(f"value = {match.group(1)}")["value"]
 
 
 def find_root(start=None):
@@ -128,9 +147,7 @@ class Repo:
 
     @functools.cached_property
     def _bootstrap_variables(self):
-        path = self.bootstrap_dir / "variables.tf"
-        with path.open(encoding="utf-8") as handle:
-            parsed = hcl2.load(handle)
+        parsed = _load_hcl(self.bootstrap_dir / "variables.tf")
         variables = {}
         for block in parsed.get("variable", []):
             for name, body in block.items():
@@ -221,16 +238,11 @@ class Repo:
 
     def _module_names(self, filename):
         """Maps each module in a Stage 0 file to its `name` argument."""
-        names, current = {}, None
-        path = self.bootstrap_dir / filename
-        for line in path.read_text(encoding="utf-8").splitlines():
-            module = _MODULE_RE.match(line)
-            if module:
-                current = module.group(1)
-                continue
-            name = _NAME_RE.match(line)
-            if current and name and current not in names:
-                names[current] = name.group(1)
+        names = {}
+        for block in _load_hcl(self.bootstrap_dir / filename).get("module", []):
+            for label, body in block.items():
+                if "name" in body:
+                    names[_unquote(label)] = _unquote(body["name"])
         return names
 
     def automation_service_accounts(self):
@@ -267,31 +279,45 @@ class Repo:
             A dict of role to a set of `Holder` values.
 
         Raises:
-            RepoError: If a binding refers to an unknown service account.
+            RepoError: If a binding refers to an unknown principal or service
+                account, or a binding local is not a map.
         """
-        text = (self.bootstrap_dir / "organization-iam.tf").read_text(
-            encoding="utf-8"
-        )
+        local_values = {}
+        path = self.bootstrap_dir / "organization-iam.tf"
+        for block in _load_hcl(path).get("locals", []):
+            local_values.update(block)
         accounts = self.automation_service_accounts()
         bindings = {}
-        for match in _HOLDER_RE.finditer(text):
-            if match.group("group"):
-                holder = Holder(HolderKind.GROUP, match.group("group"))
-            elif match.group("module"):
-                module = match.group("module")
-                if module not in accounts:
-                    raise RepoError(f"Unknown service account {module}")
-                holder = Holder(HolderKind.SERVICE_ACCOUNT, accounts[module])
-            elif match.group("user"):
-                holder = Holder(HolderKind.BOOTSTRAP_USER)
-            else:
-                holder = Holder(HolderKind.DOMAIN)
-            for role in _ROLE_RE.findall(match.group("roles")):
-                bindings.setdefault(role, set()).add(holder)
-        for block in _DELETE_ROLES_RE.findall(text):
-            for role in _ROLE_RE.findall(block):
-                bindings[role] = set()
+        for name, value in local_values.items():
+            if not name.endswith("_bindings"):
+                continue
+            for key, body in _literal_map(value, name).items():
+                holder = self._holder(_unquote(key), accounts)
+                roles = body.get("authoritative", [])
+                if not isinstance(roles, list):
+                    raise RepoError(f"Cannot read the roles of {key}")
+                for role in roles:
+                    bindings.setdefault(_unquote(role), set()).add(holder)
+        for role in local_values.get("iam_delete_roles", []):
+            bindings[_unquote(role)] = set()
         return bindings
+
+    @staticmethod
+    def _holder(key, accounts):
+        """Returns the Holder for an `organization-iam.tf` binding key."""
+        match = _HOLDER_KEY_RE.match(key)
+        if not match:
+            raise RepoError(f"Unknown principal {key}")
+        if match.group("group"):
+            return Holder(HolderKind.GROUP, match.group("group"))
+        if match.group("module"):
+            module = match.group("module")
+            if module not in accounts:
+                raise RepoError(f"Unknown service account {module}")
+            return Holder(HolderKind.SERVICE_ACCOUNT, accounts[module])
+        if match.group("user"):
+            return Holder(HolderKind.BOOTSTRAP_USER)
+        return Holder(HolderKind.DOMAIN)
 
     def authoritative_org_roles(self):
         """Returns organization roles that Stage 0 manages authoritatively."""
@@ -308,11 +334,12 @@ class Repo:
         """
         floors = []
         for path in (self.root / "modules").glob("*/versions.tf"):
-            text = path.read_text(encoding="utf-8")
-            floors.extend(
-                version.Version(found)
-                for found in _REQUIRED_VERSION_RE.findall(text)
-            )
+            for block in _load_hcl(path).get("terraform", []):
+                constraint = _unquote(block.get("required_version", ""))
+                floors.extend(
+                    version.Version(found)
+                    for found in _VERSION_FLOOR_RE.findall(constraint)
+                )
         if not floors:
             raise RepoError("No module declares a required_version floor")
         return str(max(floors))
