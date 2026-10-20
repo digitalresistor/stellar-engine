@@ -14,130 +14,144 @@
 
 import json
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import data_stores
 
 
 class TestDataStores(unittest.TestCase):
+    def test_generate_id_format(self):
+        prefix = "ds-"
+        gen_id = data_stores.generate_id(prefix)
+        self.assertTrue(gen_id.startswith(prefix))
+        self.assertEqual(len(gen_id), len(prefix) + 6)
+        suffix = gen_id[len(prefix) :]
+        self.assertTrue(suffix.isalnum())
+        self.assertTrue(suffix.islower())
 
-  def test_generate_id_format(self):
-    prefix = "ds-"
-    gen_id = data_stores.generate_id(prefix)
-    self.assertTrue(gen_id.startswith(prefix))
-    self.assertEqual(len(gen_id), len(prefix) + 6)
-    suffix = gen_id[len(prefix):]
-    self.assertTrue(suffix.isalnum())
-    self.assertTrue(suffix.islower())
+    def test_generate_id_uniqueness(self):
+        prefix = "test-"
+        id1 = data_stores.generate_id(prefix)
+        id2 = data_stores.generate_id(prefix)
+        self.assertNotEqual(id1, id2)
 
-  def test_generate_id_uniqueness(self):
-    prefix = "test-"
-    id1 = data_stores.generate_id(prefix)
-    id2 = data_stores.generate_id(prefix)
-    self.assertNotEqual(id1, id2)
+    def test_parse_http_error_valid_json(self):
+        mock_error = MagicMock()
+        error_payload = json.dumps(
+            {"error": {"message": "The requested entity was not found."}}
+        ).encode("utf-8")
+        mock_error.content = error_payload
 
-  def test_parse_http_error_valid_json(self):
-    mock_error = MagicMock()
-    error_payload = json.dumps({"error": {"message": "The requested entity was not found."}}).encode("utf-8")
-    mock_error.content = error_payload
+        msg = data_stores.parse_http_error(mock_error)
+        self.assertEqual(msg, "The requested entity was not found.")
 
-    msg = data_stores.parse_http_error(mock_error)
-    self.assertEqual(msg, "The requested entity was not found.")
+    def test_parse_http_error_missing_message(self):
+        mock_error = MagicMock()
+        error_payload = json.dumps({"error": {}}).encode("utf-8")
+        mock_error.content = error_payload
 
-  def test_parse_http_error_missing_message(self):
-    mock_error = MagicMock()
-    error_payload = json.dumps({"error": {}}).encode("utf-8")
-    mock_error.content = error_payload
+        msg = data_stores.parse_http_error(mock_error)
+        self.assertEqual(msg, "No error message found.")
 
-    msg = data_stores.parse_http_error(mock_error)
-    self.assertEqual(msg, "No error message found.")
+    def test_parse_http_error_invalid_json(self):
+        mock_error = MagicMock()
+        mock_error.content = b"Not JSON content"
+        mock_error.__str__.return_value = "HTTP 500: Server Error"
 
-  def test_parse_http_error_invalid_json(self):
-    mock_error = MagicMock()
-    mock_error.content = b"Not JSON content"
-    mock_error.__str__.return_value = "HTTP 500: Server Error"
+        msg = data_stores.parse_http_error(mock_error)
+        self.assertIn("HTTP 500", msg)
 
-    msg = data_stores.parse_http_error(mock_error)
-    self.assertIn("HTTP 500", msg)
+    @patch("data_stores.build")
+    def test_validate_data_store_generic_valid(self, mock_build):
+        mock_service = MagicMock()
+        mock_build.return_value = mock_service
+        mock_ds_req = mock_service.projects().locations().dataStores().get()
+        mock_ds_req.execute.return_value = {
+            "name": "projects/p1/locations/us/dataStores/ds-123",
+            "displayName": "Test DS",
+            "industryVertical": "GENERIC",
+            "solutionTypes": ["SOLUTION_TYPE_SEARCH"],
+            "cmekConfig": {
+                "kmsKey": "projects/p1/locations/us/keyRings/kr/cryptoKeys/k1"
+            },
+            "aclEnabled": True,
+            "contentConfig": "CONTENT_REQUIRED",
+        }
 
-  @patch('data_stores.build')
-  def test_validate_data_store_generic_valid(self, mock_build):
-    mock_service = MagicMock()
-    mock_build.return_value = mock_service
-    mock_ds_req = mock_service.projects().locations().dataStores().get()
-    mock_ds_req.execute.return_value = {
-        'name': 'projects/p1/locations/us/dataStores/ds-123',
-        'displayName': 'Test DS',
-        'industryVertical': 'GENERIC',
-        'solutionTypes': ['SOLUTION_TYPE_SEARCH'],
-        'cmekConfig': {'kmsKey': 'projects/p1/locations/us/keyRings/kr/cryptoKeys/k1'},
-        'aclEnabled': True,
-        'contentConfig': 'CONTENT_REQUIRED'
-    }
+        res = data_stores.validate_data_store(MagicMock(), "p1", "ds-123")
+        self.assertTrue(res["valid"])
+        self.assertEqual(res["id"], "ds-123")
+        self.assertEqual(res["display_name"], "Test DS")
+        self.assertEqual(res["industry_vertical"], "GENERIC")
 
-    res = data_stores.validate_data_store(MagicMock(), 'p1', 'ds-123')
-    self.assertTrue(res['valid'])
-    self.assertEqual(res['id'], 'ds-123')
-    self.assertEqual(res['display_name'], 'Test DS')
-    self.assertEqual(res['industry_vertical'], 'GENERIC')
+    @patch("data_stores.build")
+    def test_validate_data_store_non_generic_invalid(self, mock_build):
+        mock_service = MagicMock()
+        mock_build.return_value = mock_service
+        mock_ds_req = mock_service.projects().locations().dataStores().get()
+        mock_ds_req.execute.return_value = {
+            "name": "projects/p1/locations/us/dataStores/ds-456",
+            "displayName": "Media DS",
+            "industryVertical": "MEDIA",
+        }
 
-  @patch('data_stores.build')
-  def test_validate_data_store_non_generic_invalid(self, mock_build):
-    mock_service = MagicMock()
-    mock_build.return_value = mock_service
-    mock_ds_req = mock_service.projects().locations().dataStores().get()
-    mock_ds_req.execute.return_value = {
-        'name': 'projects/p1/locations/us/dataStores/ds-456',
-        'displayName': 'Media DS',
-        'industryVertical': 'MEDIA'
-    }
+        res = data_stores.validate_data_store(MagicMock(), "p1", "ds-456")
+        self.assertFalse(res["valid"])
+        self.assertEqual(res["id"], "ds-456")
 
-    res = data_stores.validate_data_store(MagicMock(), 'p1', 'ds-456')
-    self.assertFalse(res['valid'])
-    self.assertEqual(res['id'], 'ds-456')
+    @patch("data_stores.build")
+    def test_validate_data_store_exception_handling(self, mock_build):
+        mock_service = MagicMock()
+        mock_build.return_value = mock_service
+        mock_ds_req = mock_service.projects().locations().dataStores().get()
+        mock_ds_req.execute.side_effect = Exception("API connection error")
 
-  @patch('data_stores.build')
-  def test_validate_data_store_exception_handling(self, mock_build):
-    mock_service = MagicMock()
-    mock_build.return_value = mock_service
-    mock_ds_req = mock_service.projects().locations().dataStores().get()
-    mock_ds_req.execute.side_effect = Exception("API connection error")
+        res = data_stores.validate_data_store(MagicMock(), "p1", "ds-error")
+        self.assertFalse(res["valid"])
+        self.assertEqual(res["id"], "ds-error")
 
-    res = data_stores.validate_data_store(MagicMock(), 'p1', 'ds-error')
-    self.assertFalse(res['valid'])
-    self.assertEqual(res['id'], 'ds-error')
+    @patch("data_stores.build")
+    def test_import_bq_documents_auto_and_custom_id_field(self, mock_build):
+        mock_service = MagicMock()
+        mock_build.return_value = mock_service
+        mock_import = (
+            mock_service.projects()
+            .locations()
+            .collections()
+            .dataStores()
+            .branches()
+            .documents()
+            .import_
+        )
+        mock_import.return_value.execute.return_value = {
+            "name": "operations/op-1"
+        }
 
+        data_stores.import_bq_documents(
+            MagicMock(),
+            "proj-1",
+            "ds-1",
+            "dataset_a",
+            "table_b",
+            {"id": "auto"},
+        )
+        _, kwargs_auto = mock_import.call_args
+        self.assertEqual(kwargs_auto["body"]["autoGenerateIds"], True)
+        self.assertNotIn("idField", kwargs_auto["body"])
 
-
-  @patch('data_stores.build')
-  def test_import_bq_documents_auto_and_custom_id_field(self, mock_build):
-    mock_service = MagicMock()
-    mock_build.return_value = mock_service
-    mock_import = (
-        mock_service.projects()
-        .locations()
-        .collections()
-        .dataStores()
-        .branches()
-        .documents()
-        .import_
-    )
-    mock_import.return_value.execute.return_value = {'name': 'operations/op-1'}
-
-    data_stores.import_bq_documents(
-        MagicMock(), 'proj-1', 'ds-1', 'dataset_a', 'table_b', {'id': 'auto'}
-    )
-    _, kwargs_auto = mock_import.call_args
-    self.assertEqual(kwargs_auto['body']['autoGenerateIds'], True)
-    self.assertNotIn('idField', kwargs_auto['body'])
-
-    data_stores.import_bq_documents(
-        MagicMock(), 'proj-1', 'ds-1', 'dataset_a', 'table_b', {'id': 'doc_id'}
-    )
-    _, kwargs_field = mock_import.call_args
-    self.assertNotIn('autoGenerateIds', kwargs_field['body'])
-    self.assertEqual(kwargs_field['body']['idField'], 'doc_id')
+        data_stores.import_bq_documents(
+            MagicMock(),
+            "proj-1",
+            "ds-1",
+            "dataset_a",
+            "table_b",
+            {"id": "doc_id"},
+        )
+        _, kwargs_field = mock_import.call_args
+        self.assertNotIn("autoGenerateIds", kwargs_field["body"])
+        self.assertEqual(kwargs_field["body"]["idField"], "doc_id")
 
 
-if __name__ == '__main__':
-  unittest.main()
+if __name__ == "__main__":
+    unittest.main()

@@ -15,10 +15,12 @@
 import os
 import sys
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-GEM4GOV_PATH = os.path.join(REPO_ROOT, 'blueprints', 'gemini-enterprise', 'gem4gov-cli')
-TOOLS_PATH = os.path.join(REPO_ROOT, 'tools')
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+GEM4GOV_PATH = os.path.join(
+    REPO_ROOT, "blueprints", "gemini-enterprise", "gem4gov-cli"
+)
+TOOLS_PATH = os.path.join(REPO_ROOT, "tools")
 
 for p in (REPO_ROOT, GEM4GOV_PATH, TOOLS_PATH):
-  if p not in sys.path:
-    sys.path.insert(0, p)
+    if p not in sys.path:
+        sys.path.insert(0, p)
