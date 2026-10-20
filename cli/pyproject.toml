@@ -18,7 +18,7 @@ version = "0.1.0"
 description = "Operator CLI that validates and guides Stellar Engine deployments."
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.14"
+requires-python = ">=3.14,<3.15"
 dependencies = [
   "google-auth>=2.40",
   "google-cloud-billing>=1.16",

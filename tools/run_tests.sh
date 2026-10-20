@@ -49,6 +49,10 @@ def check_file(path):
 count = 0
 for root, dirs, files in os.walk('${REPO_ROOT}'):
   dirs[:] = [d for d in dirs if d not in ('.git', '.terraform', '.venv', 'venv', 'node_modules', '__pycache__')]
+  # cli/ pins its own Python in cli/pyproject.toml, which can be newer than
+  # python3 here, and the cli-tests CI job compiles and lints it on that one.
+  if root == '${REPO_ROOT}':
+    dirs[:] = [d for d in dirs if d != 'cli']
   for fname in files:
     if fname.endswith('.py'):
       fpath = os.path.join(root, fname)
