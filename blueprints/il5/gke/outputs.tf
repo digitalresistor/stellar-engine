@@ -31,17 +31,17 @@ output "cluster_master_version" {
 
 output "nodepool_name" {
   description = "The name of the additional GKE nodepool."
-  value       = module.cluster_nodepool.name
+  value       = module.cluster-nodepool.name
 }
 
 output "nodepool_id" {
   description = "The fully qualified ID of the additional GKE nodepool."
-  value       = module.cluster_nodepool.id
+  value       = module.cluster-nodepool.id
 }
 
 output "nodepool_service_account_email" {
   description = "The service account email used by the additional GKE nodepool."
-  value       = module.cluster_nodepool.service_account_email
+  value       = module.cluster-nodepool.service_account_email
 }
 
 output "gke_cluster_sa_email" {
@@ -73,5 +73,5 @@ output "bastion_vm_name" {
 
 output "bastion_vm_public_ip" {
   description = "The public IP address of the bastion Compute Engine VM (if ephemeral public IP is enabled)."
-  value       = try(module.bastion_vm.network_interfaces[0].access_config[0].nat_ip, null)
+  value       = try(module.bastion-vm.network_interfaces[0].access_config[0].nat_ip, null)
 }

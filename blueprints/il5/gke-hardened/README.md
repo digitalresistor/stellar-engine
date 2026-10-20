@@ -72,7 +72,7 @@ The Deployment Steps are outlined in the [Stellar Engine GKE Deployment Guide.](
 | [nodepool_service_account_email](outputs.tf#L51) | Service account email. |  |
 | [subnet_regions](outputs.tf#L56) | Map of subnet regions keyed by name. |  |
 | [subnets](outputs.tf#L61) | Subnet resources. |  |
-| [vpc-network](outputs.tf#L66) | Network resource. |  |
-| [vpc-subnet_ids](outputs.tf#L71) | Map of subnet IDs keyed by name. |  |
-| [vpc-subnet_ips](outputs.tf#L76) | Map of subnet address ranges keyed by name. |  |
+| [vpc_network](outputs.tf#L66) | Network resource. |  |
+| [vpc_subnet_ids](outputs.tf#L71) | Map of subnet IDs keyed by name. |  |
+| [vpc_subnet_ips](outputs.tf#L76) | Map of subnet address ranges keyed by name. |  |
 <!-- END TFDOC -->

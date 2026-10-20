@@ -167,7 +167,7 @@ The setup should now be complete and GitLab will now have HTTPS enabled.
 
 | name | description | sensitive |
 |---|---|:---:|
-| [gke-cluster](outputs.tf#L1) | Deployed GKE cluster. | ✓ |
+| [gke_cluster](outputs.tf#L1) | Deployed GKE cluster. | ✓ |
 | [lb](outputs.tf#L7) | Application Load Balancer. | ✓ |
 | [umig](outputs.tf#L13) | Unmanaged instance group. | ✓ |
 | [vm](outputs.tf#L19) | Deployed VM. | ✓ |

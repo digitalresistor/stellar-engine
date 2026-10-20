@@ -62,7 +62,7 @@ The present GCP Terraform Module in this project is set up and intended to be im
 This blueprint creates two node pools by default: `default-pool` and a separate custom node pool (e.g., `gke-nodepool-name-00`). This is an intentional design choice and a GKE best practice.
 
 * **`default-pool`**: This pool is created automatically by GKE and is suitable for running system components. By default, this blueprint keeps it.
-* **Custom Node Pool**: This pool is created by the `cluster_nodepool` module and is intended for your specific applications.
+* **Custom Node Pool**: This pool is created by the `cluster-nodepool` module and is intended for your specific applications.
 
 Using separate node pools allows you to optimize performance, security, and cost by running different types of applications on different kinds of machines. Key benefits include:
 

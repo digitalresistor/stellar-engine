@@ -76,8 +76,13 @@ resource "google_redis_instance" "cache" {
   }
 }
 
+moved {
+  from = module.gitlab_object_storage
+  to   = module.gitlab-object-storage
+}
+
 # https://docs.gitlab.com/ee/administration/object_storage.html#google-cloud-storage-gcs
-module "gitlab_object_storage" {
+module "gitlab-object-storage" {
   source        = "../../../modules/gcs"
   for_each      = toset(local.gitlab_buckets)
   project_id    = module.project.project_id

@@ -78,5 +78,5 @@ https://console.cloud.google.com/run
 | name | description | sensitive |
 |---|---|:---:|
 | [cloud_run](outputs.tf#L1) | Cloud Run Service that was created. |  |
-| [service-account](outputs.tf#L6) | Service account that was created to run the Cloud Run Service. |  |
+| [service_account](outputs.tf#L6) | Service account that was created to run the Cloud Run Service. |  |
 <!-- END TFDOC -->
