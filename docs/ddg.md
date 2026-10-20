@@ -96,7 +96,8 @@ permissions.**
 ### Local Environment Setup:
 - Clone [Stellar Engine Github](https://github.com/google/stellar-engine/)
 - Install [Google Cloud SDK](https://cloud.google.com/sdk/docs/install)
-- Update local [Terraform](https://developer.hashicorp.com/terraform/tutorials/aws-get-started/install-cli) to version >= 1.8.1
+- Install [Terraform](https://developer.hashicorp.com/terraform/tutorials/aws-get-started/install-cli) at the version that the `required_version` constraints in `modules/*/versions.tf` require
+- Install [uv](https://docs.astral.sh/uv/getting-started/installation/) to run the `stellar` command from the `cli/` project
 - Install [jq binary](https://jqlang.github.io/jq/download/)
 
 ### Google Cloud Setup:
@@ -180,6 +181,9 @@ permissions.**
   quota is below 13
   - [View and Manage
     Quotas](https://cloud.google.com/docs/quotas/view-manage)
+- Verify the prerequisites with the `stellar preflight` command and fix every
+  failed check before Stage 0, as the [CLI README](../cli/README.md) describes
+  - `uv run --project cli stellar preflight --org <organization_id> --billing-account <billing_account_id> --project <bootstrap_project_id> --prefix <prefix> --regime <compliance_regime> --region <region>`
 
 ## Stage 0 - Bootstrap
 
