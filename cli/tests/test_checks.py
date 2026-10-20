@@ -214,6 +214,16 @@ class TestIamRoles:
         assert found["iam.roles/billing.admin"].status == Status.PASS
         assert "organization" in found["iam.roles/billing.admin"].detail
 
+    def test_billing_admin_not_required_without_billing_iam(
+        self, make_ctx, cloud
+    ):
+        cloud.denied_billing_perms = {"roles/billing.admin.permission"}
+        found = statuses(
+            checks.check_iam_roles(resolved(make_ctx, billing_no_iam=True))
+        )
+        assert "iam.roles/billing.admin" not in found
+        assert set(found.values()) == {Status.PASS}
+
     def test_billing_api_disabled(self, make_ctx, cloud):
         cloud.billing_perm_error = api.ApiDisabledError(
             "cloudbilling.googleapis.com", "123"
@@ -275,6 +285,36 @@ class TestBilling:
     def test_skipped(self, make_ctx):
         found = statuses(checks.check_billing(make_ctx(billing_account=None)))
         assert found == {"billing.account": Status.SKIP}
+
+    def test_link_checked_without_billing_iam(self, make_ctx):
+        found = by_id(checks.check_billing(make_ctx(billing_no_iam=True)))
+        assert found["billing.link"].status == Status.PASS
+        assert list(found) == [
+            "billing.account",
+            "billing.link",
+            "billing.project",
+        ]
+
+    def test_link_not_checked_with_billing_iam(self, make_ctx):
+        found = statuses(checks.check_billing(make_ctx()))
+        assert "billing.link" not in found
+
+    def test_link_denied(self, make_ctx, cloud):
+        cloud.billing_account = api.AccessDeniedError("denied")
+        cloud.denied_billing_perms = {checks.BILLING_LINK_PERMISSION}
+        found = by_id(checks.check_billing(make_ctx(billing_no_iam=True)))
+        link = found["billing.link"]
+        assert link.status == Status.FAIL
+        assert checks.BILLING_LINK_PERMISSION in link.detail
+        assert "roles/billing.user" in remedy(link)
+
+    def test_link_untestable(self, make_ctx, cloud):
+        cloud.billing_perm_error = api.ApiDisabledError(
+            "cloudbilling.googleapis.com", "123"
+        )
+        found = by_id(checks.check_billing(make_ctx(billing_no_iam=True)))
+        assert found["billing.link"].status == Status.FAIL
+        assert "Cannot test project linking" in found["billing.link"].detail
 
 
 class TestProject:

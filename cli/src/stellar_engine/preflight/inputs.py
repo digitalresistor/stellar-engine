@@ -50,6 +50,7 @@ class PreflightInputs(pydantic.BaseModel):
     billing_account: str | None = pydantic.Field(
         default=None, pattern=r"^[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$"
     )
+    billing_no_iam: bool = False
     bootstrap_project: str | None = pydantic.Field(
         default=None, pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
     )

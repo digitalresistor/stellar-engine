@@ -49,6 +49,9 @@ DDG_STAGE0 = "docs/ddg.md#stage-0---bootstrap"
 # DDG prerequisite that enableServices.sh does not cover yet.
 EXTRA_APIS = ("monitoring.googleapis.com",)
 BILLING_ADMIN_ROLE = "roles/billing.admin"
+# Lets Stage 0 create projects on a billing account whose IAM it does not
+# manage, which is what Billing Account User grants.
+BILLING_LINK_PERMISSION = "billing.resourceAssociations.create"
 IMPERSONATION_ENV_VARS = (
     "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT",
     "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
@@ -495,7 +498,9 @@ def check_iam_roles(ctx):
     correct whether a role is granted directly, through a group, or by
     inheritance. Billing Account Administrator may be granted on the billing
     account instead of the organization, so it is tested there when a
-    billing account is given.
+    billing account is given. With `billing_no_iam`, Stage 0 never manages
+    billing IAM, so the role is not required and `check_billing` tests
+    project linking instead.
     """
     if ctx.org is None:
         return [_skip("iam.roles", Category.IAM, "Organization roles", "--org")]
@@ -519,7 +524,11 @@ def _role_results(ctx):
         f"//cloudresourcemanager.googleapis.com/organizations/{ctx.org.org_id}"
     )
     org_testable = ctx.cloud.testable_permissions(org_resource)
-    roles = ctx.repo.required_roles()
+    roles = [
+        role
+        for role in ctx.repo.required_roles()
+        if not (role == BILLING_ADMIN_ROLE and ctx.inputs.billing_no_iam)
+    ]
     billing_account = ctx.inputs.billing_account
     per_role = {}
     for role in roles:
@@ -611,6 +620,8 @@ def check_billing(ctx):
                 doc=DOC_BOOTSTRAP,
             )
         ]
+    if ctx.inputs.billing_no_iam:
+        results.append(_billing_link_result(ctx, account_id))
     project = ctx.inputs.bootstrap_project
     if project is None:
         results.append(
@@ -658,6 +669,49 @@ def check_billing(ctx):
         )
     )
     return results
+
+
+def _billing_link_result(ctx, account_id):
+    """Checks that the caller can link new projects to the billing account.
+
+    testIamPermissions works without read access to the account, so this
+    check runs even when the account lookup fails.
+    """
+    try:
+        granted = ctx.cloud.granted_billing_permissions(
+            account_id, [BILLING_LINK_PERMISSION]
+        )
+    except api.CloudError as error:
+        return CheckResult(
+            "billing.link",
+            Category.BILLING,
+            "Project billing link",
+            Status.FAIL,
+            f"Cannot test project linking on the billing account: {error}",
+            doc=DOC_BOOTSTRAP,
+        )
+    if BILLING_LINK_PERMISSION in granted:
+        return CheckResult(
+            "billing.link",
+            Category.BILLING,
+            "Project billing link",
+            Status.PASS,
+            f"The deploying identity can link new projects to {account_id}.",
+            doc=DOC_BOOTSTRAP,
+        )
+    return CheckResult(
+        "billing.link",
+        Category.BILLING,
+        "Project billing link",
+        Status.FAIL,
+        f"The deploying identity cannot link new projects to {account_id}, "
+        f"because it lacks {BILLING_LINK_PERMISSION}.",
+        remedy=(
+            "Ask a billing account administrator to grant Billing Account "
+            "User (roles/billing.user) on the billing account."
+        ),
+        doc=DOC_BOOTSTRAP,
+    )
 
 
 def check_project(ctx):

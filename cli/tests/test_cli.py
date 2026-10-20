@@ -148,6 +148,15 @@ def test_config_env(runner, fake_cloud, tmp_path):
     assert document["inputs"]["region"] == "us-west1"
 
 
+def test_billing_no_iam(runner, fake_cloud):
+    args = [*BASE_ARGS, "--json", "--billing-no-iam"]
+    document = json.loads(runner.invoke(cli.app, args).stdout)
+    checks_by_id = {c["check_id"]: c for c in document["checks"]}
+    assert document["inputs"]["billing_no_iam"] is True
+    assert checks_by_id["billing.link"]["status"] == "pass"
+    assert "iam.roles/billing.admin" not in checks_by_id
+
+
 def test_service_account_with_bootstrap_user(runner, fake_cloud):
     sa = "sa@example-project.iam.gserviceaccount.com"
     fake_cloud.principal = conftest.api.Principal(

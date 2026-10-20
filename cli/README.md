@@ -80,6 +80,11 @@ Preflight follows the order of the DDG prerequisites section.
   group, and inherited grants alike.
 - The billing account is open, the deploying identity holds Billing Account
   Administrator on it, and the bootstrap project bills to it.
+- The `--billing-no-iam` flag matches a Stage 0 `billing_account` input with
+  `no_iam = true`, so Stage 0 never manages billing IAM. Preflight then skips
+  the Billing Account Administrator check and tests only the
+  `billing.resourceAssociations.create` permission that links new projects
+  to the billing account.
 - The bootstrap project is active and has every API that
   `fast/stages-aw/0-bootstrap/enableServices.sh` enables, plus the Cloud
   Monitoring API that the DDG requires.

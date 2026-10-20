@@ -106,6 +106,15 @@ The current bootstrap checklist includes:
 `setIAM.yaml.sample` also grants `roles/resourcemanager.projectDeleter`; review
 the generated policy before applying it in production.
 
+A shared billing account whose IAM you cannot change still works with Stage 0.
+
+- Set `no_iam = true` in the Stage 0 `billing_account` variable, so Stage 0
+  skips every billing IAM binding.
+- Grant `roles/billing.user` on the billing account instead of
+  `roles/billing.admin`, because Stage 0 then only links new projects to it.
+- Pass the `--billing-no-iam` flag to `stellar preflight` to test that
+  permission.
+
 ## Administrative Groups
 
 Create or confirm the initial Google Cloud administrative groups used by the

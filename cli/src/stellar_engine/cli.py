@@ -85,6 +85,17 @@ def preflight(
             envvar="STELLAR_BILLING_ACCOUNT", help="Billing account ID."
         ),
     ] = None,
+    billing_no_iam: Annotated[
+        bool,
+        typer.Option(
+            "--billing-no-iam",
+            envvar="STELLAR_BILLING_NO_IAM",
+            help=(
+                "Match a Stage 0 billing_account.no_iam of true: require "
+                "only the permission to link projects to the billing account."
+            ),
+        ),
+    ] = False,
     project: Annotated[
         str | None,
         typer.Option(
@@ -170,6 +181,7 @@ def preflight(
     flags = {
         "org_id": org,
         "billing_account": billing_account,
+        "billing_no_iam": billing_no_iam,
         "bootstrap_project": project,
         "prefix": prefix,
         "regime": regime,
