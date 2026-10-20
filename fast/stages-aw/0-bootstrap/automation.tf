@@ -183,7 +183,12 @@ module "automation-project" {
   depends_on = [module.organization-logging]
 }
 
-resource "google_compute_project_metadata" "metadata-automation" {
+moved {
+  from = google_compute_project_metadata.metadata-automation
+  to   = google_compute_project_metadata.metadata_automation
+}
+
+resource "google_compute_project_metadata" "metadata_automation" {
   project = module.automation-project.project_id
   metadata = {
     block-project-ssh-keys = "TRUE" # CIS Compliance Benchmark 4.3

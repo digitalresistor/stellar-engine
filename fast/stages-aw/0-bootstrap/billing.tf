@@ -67,7 +67,12 @@ module "billing-export-project" {
   depends_on = [module.organization-logging]
 }
 
-resource "google_compute_project_metadata" "metadata-billing" {
+moved {
+  from = google_compute_project_metadata.metadata-billing
+  to   = google_compute_project_metadata.metadata_billing
+}
+
+resource "google_compute_project_metadata" "metadata_billing" {
   count   = local.billing_mode == "org" ? 1 : 0
   project = module.billing-export-project[0].project_id
   metadata = {

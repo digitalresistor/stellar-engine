@@ -76,7 +76,12 @@ data "google_logging_project_settings" "log_export" {
   depends_on = [module.log-export-project]
 }
 
-resource "google_compute_project_metadata" "metadata-log-export" {
+moved {
+  from = google_compute_project_metadata.metadata-log-export
+  to   = google_compute_project_metadata.metadata_log_export
+}
+
+resource "google_compute_project_metadata" "metadata_log_export" {
   project = module.log-export-project.project_id
   metadata = {
     block-project-ssh-keys = "TRUE" # CIS Compliance Benchmark 4.3
