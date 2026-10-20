@@ -171,3 +171,30 @@ def test_translated_decorator(raised, expected):
     with pytest.raises(expected) as caught:
         call()
     assert type(caught.value) is expected
+
+
+class _Project:
+    def __init__(self, project_id, state):
+        self.project_id = project_id
+        self.state = type("State", (), {"name": state})()
+
+
+def test_visible_project_state_queries_soft_deleted(monkeypatch):
+    queries = []
+
+    class Projects:
+        def search_projects(self, query):
+            queries.append(query)
+            if "DELETE_REQUESTED" in query:
+                return [_Project("abc-prod-iac-core-0", "DELETE_REQUESTED")]
+            return [_Project("abc-prod-iac-core-01", "ACTIVE")]
+
+    cloud = live.LiveCloudApi()
+    monkeypatch.setitem(cloud.__dict__, "_projects", Projects())
+    assert cloud.visible_project_state("abc-prod-iac-core-0") == (
+        "DELETE_REQUESTED"
+    )
+    assert queries == [
+        "id:abc-prod-iac-core-0",
+        "id:abc-prod-iac-core-0 state:DELETE_REQUESTED",
+    ]

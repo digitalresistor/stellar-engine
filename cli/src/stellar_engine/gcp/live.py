@@ -339,10 +339,18 @@ class LiveCloudApi:
         return {service.config.name for service in pager}
 
     @_translated
-    def visible_project_exists(self, project_id):
-        """See `CloudApi.visible_project_exists`."""
-        pager = self._projects.search_projects(query=f"id:{project_id}")
-        return any(project.project_id == project_id for project in pager)
+    def visible_project_state(self, project_id):
+        """See `CloudApi.visible_project_state`."""
+        # Query soft-deleted projects explicitly, so the result does not
+        # depend on which states a plain ID search includes.
+        for query in (
+            f"id:{project_id}",
+            f"id:{project_id} state:DELETE_REQUESTED",
+        ):
+            for project in self._projects.search_projects(query=query):
+                if project.project_id == project_id:
+                    return project.state.name
+        return None
 
     @_translated
     def bucket_exists(self, name):

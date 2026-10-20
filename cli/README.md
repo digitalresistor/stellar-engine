@@ -90,6 +90,8 @@ Preflight follows the order of the DDG prerequisites section.
   page, and the regime appears in the Stage 0 `regime_mapping` variable.
 - The prefix is valid, and no project, state bucket, or Assured Workloads
   folder that Stage 0 creates already exists with that prefix.
+- No soft-deleted project still holds a project ID that Stage 0 creates,
+  because a deleted project keeps its ID for 30 days.
 - Organization-wide custom roles, custom constraints, and log sinks that
   Stage 0 creates do not exist yet.
 - The organization IAM policy lists every existing grant that the first

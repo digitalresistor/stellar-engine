@@ -190,10 +190,11 @@ class CloudApi(Protocol):
         """Returns the services enabled on a project."""
         ...
 
-    def visible_project_exists(self, project_id: str) -> bool:
-        """Returns whether a project with this exact ID is visible.
+    def visible_project_state(self, project_id: str) -> str | None:
+        """Returns the state of a visible project with this exact ID.
 
-        Resource Manager answers 403 for both missing and inaccessible
+        Returns `ACTIVE`, `DELETE_REQUESTED` for a soft-deleted project, or
+        None. Resource Manager answers 403 for both missing and inaccessible
         projects, so a project outside the caller's view cannot be detected.
         """
         ...

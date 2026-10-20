@@ -156,8 +156,8 @@ class FakeCloud:
             return {*repo.required_apis(), *checks.EXTRA_APIS}
         return self._value(self.services)
 
-    def visible_project_exists(self, project_id):
-        return self._value(self.projects.get(project_id)) is not None
+    def visible_project_state(self, project_id):
+        return self._value(self.projects.get(project_id))
 
     def bucket_exists(self, name):
         return name in self.buckets

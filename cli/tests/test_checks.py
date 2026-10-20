@@ -396,6 +396,22 @@ class TestNaming:
         found = by_id(checks.check_naming(resolved(make_ctx)))
         assert "outside this identity's view" in found["naming.projects"].detail
 
+    def test_soft_deleted_project_fails_even_on_redeploy(self, make_ctx, cloud):
+        cloud.projects["tst-prod-audit-logs-0"] = "DELETE_REQUESTED"
+        ctx = resolved(make_ctx, redeploy=True)
+        found = by_id(checks.check_naming(ctx))
+        deleted = found["naming.deleted_projects"]
+        assert deleted.status == Status.FAIL
+        assert "tst-prod-audit-logs-0" in deleted.detail
+        assert "gcloud projects undelete tst-prod-audit-logs-0" in remedy(
+            deleted
+        )
+        assert found["naming.projects"].status == Status.PASS
+
+    def test_no_soft_deleted_projects_pass(self, make_ctx):
+        found = statuses(checks.check_naming(resolved(make_ctx)))
+        assert found["naming.deleted_projects"] == Status.PASS
+
     def test_unrelated_prefix_projects_pass(self, make_ctx, cloud):
         cloud.projects["tst-bootstrap"] = "ACTIVE"
         found = statuses(checks.check_naming(resolved(make_ctx)))

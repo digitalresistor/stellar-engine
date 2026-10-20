@@ -838,6 +838,76 @@ def _guarded(check_id, title, run):
         )
 
 
+def _project_results(ctx, project_ids):
+    """Checks the Stage 0 project IDs for active and soft-deleted holders.
+
+    A deleted project keeps its ID for 30 days, so a soft-deleted holder
+    blocks Stage 0 even on a redeploy. See issue #50.
+    """
+    try:
+        states = {
+            pid: ctx.cloud.visible_project_state(pid) for pid in project_ids
+        }
+    except api.CloudError as error:
+        return [
+            CheckResult(
+                "naming.projects",
+                Category.NAMING,
+                "Project IDs",
+                Status.WARN,
+                f"Cannot check for existing resources: {error}",
+            )
+        ]
+    active = [pid for pid, state in states.items() if state == "ACTIVE"]
+    deleted = [
+        pid for pid, state in states.items() if state == "DELETE_REQUESTED"
+    ]
+    results = [
+        _collision(
+            ctx,
+            "naming.projects",
+            "Project IDs",
+            active,
+            "projects",
+            unseen_note=(
+                " Project IDs are global, so a project outside this "
+                "identity's view can still own one, which Stage 0 "
+                "reports as a conflict."
+            ),
+        )
+    ]
+    if deleted:
+        restore = " ".join(
+            f"`gcloud projects undelete {pid}`" for pid in deleted
+        )
+        results.append(
+            CheckResult(
+                "naming.deleted_projects",
+                Category.NAMING,
+                "Soft-deleted projects",
+                Status.FAIL,
+                "Soft-deleted projects still hold these IDs for up to 30 "
+                f"days after deletion: {_listed(deleted)}.",
+                remedy=(
+                    "Pick a different prefix, or restore the projects with "
+                    f"{restore} if they belong to this deployment."
+                ),
+                doc=DDG_PREREQUISITES,
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "naming.deleted_projects",
+                Category.NAMING,
+                "Soft-deleted projects",
+                Status.PASS,
+                "No visible soft-deleted project holds a Stage 0 project ID.",
+            )
+        )
+    return results
+
+
 def _collision(ctx, check_id, title, taken, what, unseen_note=""):
     if not taken:
         return CheckResult(
@@ -894,28 +964,7 @@ def check_naming(ctx):
     project_ids = [
         f"{prefix}-prod-{name}" for name in ctx.repo.stage0_project_names()
     ]
-    results.append(
-        _guarded(
-            "naming.projects",
-            "Project IDs",
-            lambda: _collision(
-                ctx,
-                "naming.projects",
-                "Project IDs",
-                [
-                    pid
-                    for pid in project_ids
-                    if ctx.cloud.visible_project_exists(pid)
-                ],
-                "projects",
-                unseen_note=(
-                    " Project IDs are global, so a project outside this "
-                    "identity's view can still own one, which Stage 0 "
-                    "reports as a conflict."
-                ),
-            ),
-        )
-    )
+    results.extend(_project_results(ctx, project_ids))
     buckets = [
         f"{prefix}-prod-iac-core-{name}-0"
         for name in ("bootstrap", "outputs", "resman")
