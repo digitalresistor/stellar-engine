@@ -87,8 +87,9 @@ Evaluate diffs and static analysis findings from a skeptical maintainer perspect
 
 ## 5 Scripting and testing
 
-* Verify that Python files pass `pyflakes` and CodeQL `py/unused-local-variable` checks with no unused imports, unused local variables, or undefined names, format Python code with `yapf` using `.style.yapf`, and stay within the 79-character line limit.
-* Execute modified code paths and unit tests via `bash tools/run_tests.sh`, `pytest`, `pyflakes`, and `shellcheck` rather than relying on syntax-only checks such as `py_compile` or `bash -n`.
+* Verify that Python files pass `ruff check`, which covers the `pyflakes` rules, and CodeQL `py/unused-local-variable` checks with no unused imports, unused local variables, or undefined names.
+* Format Python code with `ruff format` using the repository `ruff.toml` file, which applies the Google Python Style Guide 4-space indentation and 80-character line limit that `ruff check` enforces.
+* Execute modified code paths and unit tests via `bash tools/run_tests.sh`, `pytest`, `ruff check`, and `shellcheck` rather than relying on syntax-only checks such as `py_compile` or `bash -n`.
 * When resource attributes change in modules or stages covered by `tftest.yaml` or `README.md` `# tftest` directives, require updated YAML plan inventories and verify that every changed inventory line maps directly to the intended change.
 * Guard empty collections before constructing `click.IntRange(1, len(items))` in interactive CLI prompts, and guard nullable dictionary fields such as `item.get("name")` before calling string methods such as `.split("/")`.
 * On Container-Optimized OS `cloud-config.yaml` and startup scripts, guard file moves and `base64` decodes from `/tmp` with `[ ! -f /tmp/... ] ||` because `/tmp` is a `tmpfs` cleared across reboots while `/run` or persistent disks retain state, enforce `0770` or `0700` directory permissions and `0600` for private keys rather than `0777`, and bound network retry loops with exponential backoff.

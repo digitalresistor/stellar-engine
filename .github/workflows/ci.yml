@@ -104,11 +104,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r tools/requirements.txt
           pip install -r blueprints/gemini-enterprise/gem4gov-cli/requirements.txt
-          pip install pytest pyflakes
+          pip install pytest
 
-      - name: CodeQL py/unused-local-variable Check (pyflakes)
+      - name: Python Lint and CodeQL py/unused-local-variable Check (ruff)
         run: |
-          pyflakes tools/ blueprints/gemini-enterprise/gem4gov-cli/ tests/
+          ruff check .
+
+      - name: Python Formatting Check (ruff)
+        run: |
+          ruff format --check .
 
       - name: Run Python Unit Tests
         run: |

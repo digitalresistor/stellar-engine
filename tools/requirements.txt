@@ -5,5 +5,5 @@ iso8601
 marko
 requests
 yamale
-yapf
+ruff==0.17.1
 jsonschema
