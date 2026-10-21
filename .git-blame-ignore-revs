@@ -16,5 +16,7 @@
 # local clones opt in with:
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
 
-# style(repo): reformat Python files with ruff
-1ce9889a5df3096811190e90fa16cc888e122e37
+# PR #302 replaced yapf with ruff and reformatted the Python files. The SHA is
+# its squash merge commit on main, so blame also skips the few tooling changes
+# that the same commit holds, such as the ruff steps in tools/lint.sh.
+7595e07901e790f0843dba97f73f05d77033d89e
