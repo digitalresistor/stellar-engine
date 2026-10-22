@@ -20,8 +20,8 @@ output "bastion_vm_name" {
 }
 
 output "bastion_vm_public_ip" {
-  description = "The public IP address of the bastion Compute Engine VM (if ephemeral public IP is enabled)."
-  value       = try(module.bastion-vm.network_interfaces[0].access_config[0].nat_ip, null)
+  description = "The external IP address of the bastion Compute Engine VM, or null when the VM has no external IP."
+  value       = module.bastion-vm.external_ip
 }
 
 output "cluster_master_version" {

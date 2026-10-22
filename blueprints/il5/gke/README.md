@@ -130,7 +130,7 @@ A bastion host VM is deployed in the Main Project to provide a secure way to acc
 | name | description | sensitive |
 |---|---|:---:|
 | [bastion_vm_name](outputs.tf#L17) | The name of the created bastion Compute Engine VM. |  |
-| [bastion_vm_public_ip](outputs.tf#L22) | The public IP address of the bastion Compute Engine VM (if ephemeral public IP is enabled). |  |
+| [bastion_vm_public_ip](outputs.tf#L22) | The external IP address of the bastion Compute Engine VM, or null when the VM has no external IP. |  |
 | [cluster_master_version](outputs.tf#L27) | The master version of the GKE cluster. |  |
 | [consumed_kms_key_id](outputs.tf#L32) | The ID of the existing KMS CryptoKey used by the GKE cluster for boot disk encryption. |  |
 | [consumed_network_self_link](outputs.tf#L37) | The self-link of the existing VPC network used by the GKE cluster. |  |
