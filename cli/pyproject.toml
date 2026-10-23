@@ -60,6 +60,7 @@ packages = ["src/stellar_engine"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = ["terraform: runs the real terraform binary"]
 
 [tool.pyright]
 include = ["src", "tests"]
