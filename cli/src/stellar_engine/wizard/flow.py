@@ -343,7 +343,8 @@ def ask_bootstrap(data: dict, ctx: _Context) -> None:
     """Asks for the bootstrap project and whether Stage 0 projects exist.
 
     Organizations where only a human can link billing pre-create the
-    Stage 0 projects, so Stage 0 imports them instead of creating them.
+    Stage 0 projects, so Stage 0 imports them instead of creating them,
+    and the section then asks whether a Stage 0 destroy keeps them.
 
     Args:
         data: Answer data, which the section updates in place.
@@ -366,6 +367,12 @@ def ask_bootstrap(data: dict, ctx: _Context) -> None:
     if precreated:
         ctx.prompter.note("Stage 0 imports these pre-created projects:")
         _note_imports(data, ctx)
+        # Someone else created these projects, so a Stage 0 destroy keeps
+        # them unless the operator says otherwise.
+        data["keep_imported_projects"] = ctx.prompter.confirm(
+            "Keep these projects when Stage 0 is destroyed?",
+            default=data.get("keep_imported_projects", True),
+        )
 
 
 def ask_compliance(data: dict, ctx: _Context) -> None:
@@ -671,7 +678,10 @@ SECTIONS: Mapping[str, Section] = {
     "prefix": Section(ask_prefix, ("prefix",)),
     "organization": Section(ask_organization, ("organization",)),
     "billing": Section(ask_billing, ("billing",)),
-    "bootstrap": Section(ask_bootstrap, ("bootstrap_project", "imports")),
+    "bootstrap": Section(
+        ask_bootstrap,
+        ("bootstrap_project", "imports", "keep_imported_projects"),
+    ),
     # The regime comes before the region, because it limits the regions.
     "compliance": Section(ask_compliance, ("compliance",)),
     "region": Section(

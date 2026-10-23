@@ -191,6 +191,24 @@ imports:
   active, and reports it as a pass instead of a name collision.
 - The `--set` flag accepts an address in double quotes, such as
   `--set 'imports.0-bootstrap."module.automation-project.google_project.project[0]"=abc-prod-iac-core-0'`.
+- The `keep_imported_projects` answer defaults to true, so a Stage 0
+  destroy keeps the projects that an administrator creates in advance.
+- The wizard asks whether to keep these projects right after you confirm
+  that the Stage 0 projects exist already.
+- The `stellar render` command writes an `ABANDON` value to the
+  `project_deletion_policies` variable for each imported project.
+- The command sets this variable only when the Stage 0 code declares it.
+- An older Stage 0 version lacks the variable, so the command warns that a
+  Stage 0 destroy deletes the imported projects.
+- The CLI rejects a `project_deletion_policies` key in the
+  `overrides.0-bootstrap` answer, because the `keep_imported_projects`
+  answer controls it.
+- You cannot set a `PREVENT` policy on a Stage 0 project through the
+  `overrides` answer for that reason.
+- The `stellar env show` command prints the deletion policy of each Stage 0
+  project.
+- The `--answers-from` flag carries the `keep_imported_projects` answer,
+  because it records a preference rather than the state of an organization.
 
 ## 7 Import organization policies
 

@@ -222,6 +222,10 @@ class Answers(_Model):
             import ID, for resources that exist before the first apply,
             such as projects pre-created where billing linkage needs a
             human.
+        keep_imported_projects: Whether `terraform destroy` of Stage 0
+            keeps the Stage 0 projects that `imports` adopts, because
+            someone else created them. stellar then sets their deletion
+            policy to ABANDON, when the Stage 0 version supports it.
         existing_org_policies: Constraints whose organization policies
             exist before Stage 0 and that Stage 0 declares, which the final
             Stage 0 apply imports. `stellar imports scan` fills it.
@@ -253,6 +257,13 @@ class Answers(_Model):
     overrides: dict[str, dict[str, Any]] = pydantic.Field(default_factory=dict)
     imports: dict[str, dict[str, _NonEmpty]] = pydantic.Field(
         default_factory=dict
+    )
+    keep_imported_projects: bool = pydantic.Field(
+        default=True,
+        description=(
+            "Keep the imported Stage 0 projects when Terraform destroys "
+            "Stage 0, through an ABANDON deletion policy."
+        ),
     )
     existing_org_policies: list[_Constraint] = pydantic.Field(
         default_factory=list

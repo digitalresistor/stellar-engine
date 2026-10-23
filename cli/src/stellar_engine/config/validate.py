@@ -178,6 +178,20 @@ def stage_override_problems(
             f"outputs provide to {stage} through *.auto.tfvars.json; "
             "change it in the Stage 0 answers instead."
         )
+    # Only Stage 0 versions that declare the variable read it, and stellar
+    # derives it there; older versions reject it as unknown below.
+    if (
+        stage == paths.BOOTSTRAP
+        and repo_lib.PROJECT_DELETION_POLICIES in overrides
+        and repo_lib.PROJECT_DELETION_POLICIES
+        in repo.stage_variable_names(stage)
+    ):
+        found.append(
+            f"overrides.{stage} sets {repo_lib.PROJECT_DELETION_POLICIES}, "
+            "which stellar derives from keep_imported_projects and "
+            f"imports.{stage}; remove the override and set "
+            "keep_imported_projects instead."
+        )
     owned = sorted(set(overrides) & _CLI_OWNED_KEYS.get(stage, frozenset()))
     if owned:
         found.append(
