@@ -1,0 +1,18 @@
+# serializer version: 1
+# name: test_dumps_snapshot
+  '''
+  # stellar render writes this file from envs/lab1/answers.yaml imports.0-bootstrap.
+  # Edit answers.yaml and rerun stellar render; the next render replaces manual edits.
+  
+  import {
+    to = module.automation-project.google_project.project[0]
+    id = "lab1-prod-iac-core-0"
+  }
+  
+  import {
+    to = module.log-export-project.google_project.project[0]
+    id = "lab1-prod-audit-logs-0"
+  }
+  
+  '''
+# ---
