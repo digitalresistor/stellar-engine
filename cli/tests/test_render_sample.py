@@ -21,13 +21,18 @@ a sample changes in a way the renderer must follow.
 import hcl2
 
 import conftest
+from stellar_engine import paths
 from stellar_engine.render import sample
 
-STAGES_DIR = conftest.REPO_ROOT / "fast/stages-aw"
+
+def _sample_path(stage):
+    return (
+        paths.stage_dir(conftest.REPO_ROOT, stage) / "terraform.tfvars.sample"
+    )
 
 
 def _load(stage):
-    return sample.load(STAGES_DIR / stage / "terraform.tfvars.sample")
+    return sample.load(_sample_path(stage))
 
 
 def test_bootstrap_order_includes_commented_keys():
@@ -119,8 +124,8 @@ def test_resman_sample():
 
 
 def test_values_match_python_hcl2_keys():
-    for stage in ("0-bootstrap", "1-resman"):
-        path = STAGES_DIR / stage / "terraform.tfvars.sample"
+    for stage in paths.STAGES:
+        path = _sample_path(stage)
         with path.open(encoding="utf-8") as handle:
             raw = hcl2.load(handle)
         raw.pop("__comments__", None)

@@ -15,64 +15,48 @@
 """Tests for the stage tfvars builders."""
 
 import shutil
-import subprocess
 
 import pytest
 
 import conftest
-import render_fixtures
+import helpers
 from stellar_engine import paths
+from stellar_engine.config import validate
 from stellar_engine.render import hcl
 from stellar_engine.render import stages
 
-_needs_terraform = pytest.mark.skipif(
-    shutil.which("terraform") is None,
-    reason="terraform is missing",
-)
-
 
 def _build(repo, stage, name="fedramp_high", **updates):
-    answers = render_fixtures.load_answers(name, **updates)
-    return stages.build(
-        stage, answers, repo, render_fixtures.env_paths(answers)
-    )
+    return helpers.render(repo, name, stage, **updates)
 
 
 @pytest.mark.parametrize("stage", paths.STAGES)
-@pytest.mark.parametrize("name", render_fixtures.ALL_FIXTURES)
+@pytest.mark.parametrize("name", helpers.ALL_FIXTURES)
 def test_snapshot(name, stage, repo, snapshot):
-    answers = render_fixtures.load_answers(name)
-    rendered = stages.build(
-        stage, answers, repo, render_fixtures.env_paths(answers)
-    )
+    rendered = helpers.render(repo, name, stage)
     assert rendered.stage == stage
     assert rendered.text == snapshot
 
 
 @pytest.mark.parametrize("stage", paths.STAGES)
-@pytest.mark.parametrize("name", render_fixtures.ALL_FIXTURES)
+@pytest.mark.parametrize("name", helpers.ALL_FIXTURES)
 def test_text_parses_back_to_values(name, stage, repo):
-    answers = render_fixtures.load_answers(name)
-    rendered = stages.build(
-        stage, answers, repo, render_fixtures.env_paths(answers)
-    )
+    rendered = helpers.render(repo, name, stage)
     assert hcl.loads(rendered.text) == rendered.values
     assert list(hcl.loads(rendered.text)) == list(rendered.values)
 
 
 def test_aliases_resolve(repo):
-    answers = render_fixtures.load_answers("fedramp_high")
-    env = render_fixtures.env_paths(answers)
+    answers = helpers.load_fixture("fedramp_high")
+    env = helpers.env_paths(answers)
     assert stages.build("0", answers, repo, env).stage == "0-bootstrap"
     assert stages.build("1", answers, repo, env).stage == "1-resman"
 
 
 def test_unknown_stage(repo):
-    answers = render_fixtures.load_answers("fedramp_high")
+    answers = helpers.load_fixture("fedramp_high")
     with pytest.raises(ValueError, match="2-networking"):
-        stages.build(
-            "2-networking", answers, repo, render_fixtures.env_paths(answers)
-        )
+        stages.build("2-networking", answers, repo, helpers.env_paths(answers))
 
 
 def test_header_names_sources(repo):
@@ -112,8 +96,8 @@ def test_stage0_follows_sample_order(repo):
 
 
 def test_stage0_minimal_values(repo, tmp_path):
-    answers = render_fixtures.load_answers("fedramp_high")
-    env = render_fixtures.env_paths(answers, home=tmp_path)
+    answers = helpers.load_fixture("fedramp_high")
+    env = helpers.env_paths(answers, home=tmp_path)
     values = stages.build("0", answers, repo, env).values
     assert values["billing_account"] == {"id": conftest.BILLING}
     assert values["organization"] == {
@@ -269,7 +253,7 @@ def test_override_of_cli_owned_key_is_rejected(repo, stage, key):
 
 
 def test_override_problems_cover_every_stage(repo):
-    answers = render_fixtures.load_answers("il5").model_copy(
+    answers = helpers.load_fixture("il5").model_copy(
         update={
             "overrides": {
                 "0-bootstrap": {"not_a_var": 1, "iam": {}},
@@ -277,7 +261,7 @@ def test_override_problems_cover_every_stage(repo):
             }
         }
     )
-    found = stages.override_problems(answers, repo)
+    found = validate.override_problems(answers, repo)
     assert len(found) == 2
     assert "overrides.0-bootstrap sets not_a_var" in found[0]
     assert "overrides.1-resman sets prefix" in found[1]
@@ -304,8 +288,8 @@ def test_placeholder_in_key_is_rejected(repo):
 
 
 def test_stage1_values(repo, tmp_path):
-    answers = render_fixtures.load_answers("fedramp_moderate")
-    env = render_fixtures.env_paths(answers, home=tmp_path)
+    answers = helpers.load_fixture("fedramp_moderate")
+    env = helpers.env_paths(answers, home=tmp_path)
     values = stages.build("1-resman", answers, repo, env).values
     assert list(values) == ["tenants", "envs_folders", "outputs_location"]
     assert values["tenants"] == {
@@ -356,52 +340,36 @@ def test_stage1_billing_override(repo):
 
 
 @pytest.mark.terraform
-@_needs_terraform
 @pytest.mark.parametrize("stage", paths.STAGES)
-@pytest.mark.parametrize("name", render_fixtures.ALL_FIXTURES)
+@pytest.mark.parametrize("name", helpers.ALL_FIXTURES)
 def test_terraform_fmt_keeps_text(name, stage, repo):
-    answers = render_fixtures.load_answers(name)
-    text = stages.build(
-        stage, answers, repo, render_fixtures.env_paths(answers)
-    ).text
-    result = subprocess.run(
-        ["terraform", "fmt", "-"],
-        input=text,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=60,
-    )
+    text = helpers.render(repo, name, stage).text
+    result = helpers.terraform_fmt(text)
     assert result.returncode == 0, result.stderr
     assert result.stdout == text
 
 
 @pytest.mark.terraform
-@_needs_terraform
 @pytest.mark.parametrize("stage", paths.STAGES)
-@pytest.mark.parametrize("name", render_fixtures.ALL_FIXTURES)
+@pytest.mark.parametrize("name", helpers.ALL_FIXTURES)
 def test_terraform_accepts_variables(name, stage, repo, tmp_path):
     # Only variables.tf and the inputs: a plan with no resources still
     # converts every value to its declared type and runs every validation,
     # without credentials or providers.
-    answers = render_fixtures.load_answers(name)
-    env = render_fixtures.env_paths(answers, home=tmp_path / "home")
+    answers = helpers.load_fixture(name)
+    env = helpers.env_paths(answers, home=tmp_path / "home")
     rendered = stages.build(stage, answers, repo, env)
     harness = tmp_path / "harness"
     harness.mkdir()
-    stage_dir = repo.root / stages.STAGES_DIR / stage
+    stage_dir = paths.stage_dir(repo.root, stage)
     shutil.copy(stage_dir / "variables.tf", harness / "variables.tf")
     (harness / "terraform.tfvars").write_text(rendered.text, encoding="utf-8")
     if stage == "1-resman":
-        for path in render_fixtures.STAGE_OUTPUTS_DIR.glob(
-            "*.auto.tfvars.json"
-        ):
+        for path in helpers.STAGE_OUTPUTS_DIR.glob("*.auto.tfvars.json"):
             shutil.copy(path, harness / path.name)
-    init = render_fixtures.terraform(
-        harness, "init", "-backend=false", "-input=false"
-    )
+    init = helpers.terraform(harness, "init", "-backend=false", "-input=false")
     assert init.returncode == 0, init.stderr
-    plan = render_fixtures.terraform(harness, "plan", "-input=false")
+    plan = helpers.terraform(harness, "plan", "-input=false")
     assert plan.returncode == 0, plan.stderr
     # Stage 0 outputs keys such as `logging` that Stage 1 does not declare,
     # so only the rendered file must be free of undeclared variables.

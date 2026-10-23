@@ -12,22 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the home layout, environment paths and engine sources."""
+"""Tests for the home layout and environment paths."""
 
 import os
 import pathlib
 import shutil
-import stat
 import subprocess
 
 import pytest
 
 import conftest
 from stellar_engine import paths
-
-
-def _mode(path):
-    return stat.S_IMODE(path.stat().st_mode)
 
 
 @pytest.mark.parametrize(
@@ -84,9 +79,9 @@ def test_resolve_home_expands_user_and_relative(tmp_path, monkeypatch):
 def test_home_ensure_creates_private_home_and_gitignore(tmp_path):
     home = paths.Home(tmp_path / "a" / "home")
     home.ensure()
-    assert _mode(tmp_path / "a") == 0o700
-    assert _mode(home.root) == 0o700
-    assert _mode(home.envs_dir) == 0o700
+    assert conftest.mode(tmp_path / "a") == 0o700
+    assert conftest.mode(home.root) == 0o700
+    assert conftest.mode(home.envs_dir) == 0o700
     assert home.gitignore_path.read_text() == paths.GITIGNORE
 
 
@@ -163,6 +158,12 @@ def test_resolve_prefix(tmp_path):
         home.resolve_prefix(None)
     assert home.resolve_prefix("abc") == "abc"
     home.set_current("cur")
+    assert home.stale_current_message() is not None
+    with pytest.raises(paths.NoEnvironmentError, match="no longer exists"):
+        home.resolve_prefix(None)
+    home.env("cur").ensure()
+    home.env("cur").answers.write_text("prefix: cur\n")
+    assert home.stale_current_message() is None
     assert home.resolve_prefix(None) == "cur"
     assert home.resolve_prefix("abc") == "abc"
 
@@ -202,7 +203,7 @@ def test_env_ensure_private_dirs(tmp_path):
         env.stages_dir.parent,
     ):
         assert directory.is_dir()
-        assert _mode(directory) == 0o700
+        assert conftest.mode(directory) == 0o700
     env.ensure()
 
 
@@ -244,45 +245,3 @@ def _git(root, *args):
             "GIT_CONFIG_NOSYSTEM": "1",
         },
     )
-
-
-@pytest.mark.skipif(shutil.which("git") is None, reason="git is missing")
-def test_local_checkout_describe(tmp_path):
-    _git(tmp_path, "init", "-q")
-    (tmp_path / "main.tf").write_text("# v1\n")
-    _git(tmp_path, "add", "main.tf")
-    _git(tmp_path, "commit", "-q", "-m", "init")
-    checkout = paths.LocalCheckout(tmp_path)
-    info = checkout.describe()
-    assert info.root == tmp_path
-    assert info.commit is not None
-    assert len(info.commit) == 40
-    assert info.tag is None
-    assert info.dirty is False
-
-    (tmp_path / "scratch.txt").write_text("untracked")
-    assert checkout.describe().dirty is False
-
-    _git(tmp_path, "tag", "v1.0.0")
-    assert checkout.describe().tag == "v1.0.0"
-
-    (tmp_path / "main.tf").write_text("# v2\n")
-    assert checkout.describe().dirty is True
-
-
-def test_local_checkout_outside_git(tmp_path, monkeypatch):
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
-    info = paths.LocalCheckout(tmp_path).describe()
-    assert info == paths.EngineInfo(tmp_path, None, None, None)
-
-
-def test_local_checkout_without_git_binary(tmp_path, monkeypatch):
-    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-    info = paths.LocalCheckout(conftest.REPO_ROOT).describe()
-    assert info.commit is None
-    assert info.dirty is None
-
-
-def test_local_checkout_is_engine_source():
-    source: paths.EngineSource = paths.LocalCheckout(conftest.REPO_ROOT)
-    assert source.root == conftest.REPO_ROOT

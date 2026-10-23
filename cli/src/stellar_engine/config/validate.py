@@ -28,13 +28,21 @@ from stellar_engine import repo as repo_lib
 from stellar_engine.config import derive
 from stellar_engine.config import models
 from stellar_engine.preflight import regions
-from stellar_engine.render import stages
 
 # Project and service account IDs share this limit, enforced by the
 # validation blocks in `modules/project` and `modules/iam-service-account`.
 ID_MAX_LENGTH = 30
 
-_BOOTSTRAP_STAGE = paths.STAGES[0]
+# Keys that stellar owns, so an override would desync the workspace from
+# the environment: the prefix names the env, its workspaces and its import
+# IDs, outputs_location is the env's fast-config folder that Stage 1 links
+# from, and bootstrap_user only goes on the first apply's command line.
+_CLI_OWNED_KEYS = {
+    paths.BOOTSTRAP: frozenset(
+        {"bootstrap_user", "outputs_location", "prefix"}
+    ),
+    paths.RESMAN: frozenset({"outputs_location"}),
+}
 
 _IDENT = r"[A-Za-z_][A-Za-z0-9_-]*"
 _INDEX = r'\[(?:[0-9]+|"(?:[^"\\]|\\.)*")\]'
@@ -117,7 +125,72 @@ def problems(answers: models.Answers, repo: repo_lib.Repo) -> list[str]:
             )
     found.extend(_stage0_import_id_problems(answers, repo))
     found.extend(_org_policy_problems(answers, repo))
-    found.extend(stages.override_problems(answers, repo))
+    found.extend(override_problems(answers, repo))
+    return found
+
+
+def override_problems(
+    answers: models.Answers, repo: repo_lib.Repo
+) -> list[str]:
+    """Checks `answers.overrides` against what each stage accepts.
+
+    An override must name a variable the stage declares, must not set a
+    key that an `*.auto.tfvars.json` file provides, because Terraform reads
+    those files after `terraform.tfvars` and silently ignores the override,
+    and must not set a key that stellar derives for the environment.
+
+    Args:
+        answers: Answers that already passed model validation.
+        repo: The engine checkout whose stage variables are used.
+
+    Returns:
+        Readable problems, each naming the override, empty when every
+        override is valid.
+    """
+    return [
+        problem
+        for stage in paths.STAGES
+        for problem in stage_override_problems(answers, repo, stage)
+    ]
+
+
+def stage_override_problems(
+    answers: models.Answers, repo: repo_lib.Repo, stage: str
+) -> list[str]:
+    """Checks the overrides of one stage, as `override_problems` describes.
+
+    Args:
+        answers: Answers that already passed model validation.
+        repo: The engine checkout whose stage variables are used.
+        stage: Stage directory name, such as `0-bootstrap`.
+
+    Returns:
+        Readable problems, each naming the override.
+    """
+    overrides = answers.overrides.get(stage, {})
+    if not overrides:
+        return []
+    found = []
+    clashes = sorted(set(overrides) & repo.auto_tfvars_keys(stage))
+    if clashes:
+        found.append(
+            f"overrides.{stage} sets {', '.join(clashes)}, which Stage 0 "
+            f"outputs provide to {stage} through *.auto.tfvars.json; "
+            "change it in the Stage 0 answers instead."
+        )
+    owned = sorted(set(overrides) & _CLI_OWNED_KEYS.get(stage, frozenset()))
+    if owned:
+        found.append(
+            f"overrides.{stage} sets {', '.join(owned)}, which stellar "
+            "derives for the environment; remove the override and change "
+            "the answer itself, such as prefix or bootstrap_user."
+        )
+    unknown = sorted(set(overrides) - repo.stage_variable_names(stage))
+    if unknown:
+        found.append(
+            f"overrides.{stage} sets {', '.join(unknown)}, but {stage} "
+            "declares no such variable."
+        )
     return found
 
 
@@ -129,14 +202,14 @@ def _stage0_import_id_problems(answers, repo):
     import of any other ID would make Terraform replace, and so delete, the
     adopted project.
     """
-    imports = answers.imports.get(_BOOTSTRAP_STAGE, {})
+    imports = answers.imports.get(paths.BOOTSTRAP, {})
     found = []
     for project in repo.stage0_projects():
         import_id = imports.get(project.address)
         expected = derive.stage0_project_id(answers, project)
         if import_id is not None and import_id != expected:
             found.append(
-                f"imports.{_BOOTSTRAP_STAGE}: {project.address} imports "
+                f"imports.{paths.BOOTSTRAP}: {project.address} imports "
                 f"{import_id}, but Stage 0 names that project {expected} "
                 f"from prefix {answers.prefix}, so Terraform would replace "
                 f"the imported project; set the import ID to {expected}."
@@ -167,12 +240,12 @@ def _org_policy_problems(answers, repo):
             "data/custom-org-policies; remove them or rerun stellar imports "
             "scan."
         )
-    config = answers.overrides.get(_BOOTSTRAP_STAGE, {}).get(
+    config = answers.overrides.get(paths.BOOTSTRAP, {}).get(
         "org_policies_config"
     )
     if isinstance(config, dict) and config.get("import_defaults") is True:
         found.append(
-            f"overrides.{_BOOTSTRAP_STAGE}.org_policies_config."
+            f"overrides.{paths.BOOTSTRAP}.org_policies_config."
             "import_defaults is true while existing_org_policies is set; "
             "import_defaults imports a fixed list of policies whether or "
             "not each one exists, so a missing policy fails the import, "

@@ -25,21 +25,18 @@ escape hatch for variables the model does not cover.
 from collections.abc import Callable, Iterator, Mapping
 import copy
 import dataclasses
-import functools
 import pathlib
 import re
 from typing import Any
-
-import hcl2
 
 from stellar_engine import paths
 from stellar_engine import repo as repo_lib
 from stellar_engine.config import derive
 from stellar_engine.config import models
+from stellar_engine.config import validate
 from stellar_engine.render import hcl
 from stellar_engine.render import sample as sample_lib
 
-STAGES_DIR = pathlib.Path("fast/stages-aw")
 SAMPLE_NAME = "terraform.tfvars.sample"
 # Sample placeholders look like `<billing_account_id>`.
 PLACEHOLDER_RE = re.compile(r"<[a-z_]+>")
@@ -53,14 +50,6 @@ _KMS_COMMENT_DERIVED = (
 _KMS_COMMENT_EXPLICIT = (
     "# KMS protection level for CMEK keys, which answers.yaml sets.",
 )
-# Keys that stellar owns, so an override would desync the workspace from
-# the environment: the prefix names the env, its workspaces and its import
-# IDs, outputs_location is the env's fast-config folder that Stage 1 links
-# from, and bootstrap_user only goes on the first apply's command line.
-_CLI_OWNED_KEYS = {
-    "0-bootstrap": frozenset({"bootstrap_user", "outputs_location", "prefix"}),
-    "1-resman": frozenset({"outputs_location"}),
-}
 _OUTPUTS_COMMENT = (
     "# Per-environment folder for the provider and tfvars files that later",
     "# stages read. stellar derives it from the home on every render.",
@@ -88,32 +77,7 @@ class Rendered:
 
 def sample_path(repo: repo_lib.Repo, stage: str) -> pathlib.Path:
     """Returns the tfvars sample path of a stage in the engine checkout."""
-    return repo.root / STAGES_DIR / stage / SAMPLE_NAME
-
-
-def variable_names(repo: repo_lib.Repo, stage: str) -> frozenset[str]:
-    """Returns the variables a stage declares in its `variables.tf`.
-
-    Args:
-        repo: The engine checkout.
-        stage: Stage directory name.
-
-    Returns:
-        The declared variable names.
-    """
-    return _variable_names(repo.root, stage)
-
-
-@functools.cache
-def _variable_names(root: pathlib.Path, stage: str) -> frozenset[str]:
-    path = root / STAGES_DIR / stage / "variables.tf"
-    with path.open(encoding="utf-8") as handle:
-        parsed = hcl2.load(handle)
-    return frozenset(
-        hcl.unquote(name)
-        for block in parsed.get("variable", [])
-        for name in block
-    )
+    return paths.stage_dir(repo.root, stage) / SAMPLE_NAME
 
 
 def _bootstrap(
@@ -212,8 +176,8 @@ _BUILDERS: dict[
         dict[str, Any],
     ],
 ] = {
-    "0-bootstrap": _bootstrap,
-    "1-resman": _resman,
+    paths.BOOTSTRAP: _bootstrap,
+    paths.RESMAN: _resman,
 }
 
 
@@ -277,59 +241,6 @@ def _comments(
     return comments
 
 
-def override_problems(
-    answers: models.Answers, repo: repo_lib.Repo
-) -> list[str]:
-    """Checks `answers.overrides` against what each stage accepts.
-
-    An override must name a variable the stage declares, must not set a
-    key that an `*.auto.tfvars.json` file provides, because Terraform reads
-    those files after `terraform.tfvars` and silently ignores the override,
-    and must not set a key that stellar derives for the environment.
-
-    Args:
-        answers: Answers that already passed model validation.
-        repo: The engine checkout whose stage variables are used.
-
-    Returns:
-        Readable problems, each naming the override, empty when every
-        override is valid.
-    """
-    return [
-        problem
-        for stage in paths.STAGES
-        for problem in _stage_override_problems(answers, repo, stage)
-    ]
-
-
-def _stage_override_problems(answers, repo, stage):
-    overrides = answers.overrides.get(stage, {})
-    if not overrides:
-        return []
-    found = []
-    clashes = sorted(set(overrides) & repo.auto_tfvars_keys(stage))
-    if clashes:
-        found.append(
-            f"overrides.{stage} sets {', '.join(clashes)}, which Stage 0 "
-            f"outputs provide to {stage} through *.auto.tfvars.json; "
-            "change it in the Stage 0 answers instead."
-        )
-    owned = sorted(set(overrides) & _CLI_OWNED_KEYS.get(stage, frozenset()))
-    if owned:
-        found.append(
-            f"overrides.{stage} sets {', '.join(owned)}, which stellar "
-            "derives for the environment; remove the override and change "
-            "the answer itself, such as prefix or bootstrap_user."
-        )
-    unknown = sorted(set(overrides) - variable_names(repo, stage))
-    if unknown:
-        found.append(
-            f"overrides.{stage} sets {', '.join(unknown)}, but {stage} "
-            "declares no such variable."
-        )
-    return found
-
-
 def header(repo: repo_lib.Repo, stage: str, prefix: str) -> list[str]:
     """Returns the generated header of a stage's tfvars file.
 
@@ -368,12 +279,13 @@ def build(
         The rendered values and text.
 
     Raises:
-        RenderError: If an override fails `override_problems`, a key is
+        RenderError: If an override fails
+            `validate.stage_override_problems`, a key is
             not a stage variable, or a sample placeholder survives.
         ValueError: If the stage name is unknown.
     """
     stage = paths.resolve_stage(stage)
-    found = _stage_override_problems(answers, repo, stage)
+    found = validate.stage_override_problems(answers, repo, stage)
     if found:
         raise RenderError(" ".join(found))
     sample = sample_lib.load(sample_path(repo, stage))
@@ -381,7 +293,7 @@ def build(
     built = _BUILDERS[stage](answers, repo, env, sample)
     built = {key: value for key, value in built.items() if key not in auto}
     merged = _merge(built, answers.overrides.get(stage, {}))
-    declared = variable_names(repo, stage)
+    declared = repo.stage_variable_names(stage)
     unknown = sorted(set(merged) - declared)
     if unknown:
         raise RenderError(

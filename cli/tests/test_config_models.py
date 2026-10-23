@@ -17,14 +17,14 @@
 import pydantic
 import pytest
 
-import answer_fixtures
 import conftest
+import helpers
 from stellar_engine import paths
 from stellar_engine.config import models
 
 
 def test_minimal_answers_get_defaults():
-    answers = models.Answers.model_validate(answer_fixtures.answer_data())
+    answers = helpers.minimal_answers()
     assert answers.schema_version == 1
     assert list(answers.resman.envs) == ["Prod", "Int", "Test"]
     assert answers.resman.tenants == {}
@@ -37,8 +37,8 @@ def test_minimal_answers_get_defaults():
 
 
 def test_default_envs_are_not_shared():
-    first = models.Answers.model_validate(answer_fixtures.answer_data())
-    second = models.Answers.model_validate(answer_fixtures.answer_data())
+    first = helpers.minimal_answers()
+    second = helpers.minimal_answers()
     first.resman.envs["Dev"] = models.EnvFolder()
     assert "Dev" not in second.resman.envs
 
@@ -46,13 +46,11 @@ def test_default_envs_are_not_shared():
 @pytest.mark.parametrize(
     "data",
     [
-        answer_fixtures.answer_data(unknown=True),
-        answer_fixtures.answer_data(
+        helpers.minimal_data(unknown=True),
+        helpers.minimal_data(
             billing={"account_id": conftest.BILLING, "extra": 1}
         ),
-        answer_fixtures.answer_data(
-            resman={"tenants": {"ten1": {"name": "x"}}}
-        ),
+        helpers.minimal_data(resman={"tenants": {"ten1": {"name": "x"}}}),
     ],
 )
 def test_unknown_keys_are_rejected(data):
@@ -61,7 +59,7 @@ def test_unknown_keys_are_rejected(data):
 
 
 def test_numeric_organization_id_becomes_string():
-    data = answer_fixtures.answer_data()
+    data = helpers.minimal_data()
     data["organization"]["id"] = int(conftest.ORG_ID)
     answers = models.Answers.model_validate(data)
     assert answers.organization.id == conftest.ORG_ID
@@ -71,7 +69,6 @@ def test_numeric_organization_id_becomes_string():
     ("field", "value"),
     [
         ("prefix", "Tst"),
-        ("prefix", "abcdefgh"),
         ("prefix", "1ab"),
         ("prefix", "ab-c"),
         ("bootstrap_project", "Bad_Project"),
@@ -87,9 +84,7 @@ def test_numeric_organization_id_becomes_string():
 )
 def test_invalid_formats_are_rejected(field, value):
     with pytest.raises(pydantic.ValidationError):
-        models.Answers.model_validate(
-            answer_fixtures.answer_data(**{field: value})
-        )
+        helpers.minimal_answers(**{field: value})
 
 
 @pytest.mark.parametrize(
@@ -97,30 +92,26 @@ def test_invalid_formats_are_rejected(field, value):
     [None, "ops@example.com", {"ops@example.com": ["ALL"]}],
 )
 def test_essential_contacts_accepts_string_or_map(contacts):
-    answers = models.Answers.model_validate(
-        answer_fixtures.answer_data(essential_contacts=contacts)
-    )
+    answers = helpers.minimal_answers(essential_contacts=contacts)
     assert answers.essential_contacts == contacts
 
 
 def test_env_keys_that_differ_only_in_case_are_rejected():
-    data = answer_fixtures.answer_data(
-        resman={"envs": {"Prod": {}, "prod": {}}}
-    )
+    data = helpers.minimal_data(resman={"envs": {"Prod": {}, "prod": {}}})
     with pytest.raises(pydantic.ValidationError, match="only in case"):
         models.Answers.model_validate(data)
 
 
 @pytest.mark.parametrize("key", ["1prod", "prod_1", "pr od"])
 def test_env_keys_must_fit_project_ids(key):
-    data = answer_fixtures.answer_data(resman={"envs": {key: {}}})
+    data = helpers.minimal_data(resman={"envs": {key: {}}})
     with pytest.raises(pydantic.ValidationError, match="Env key"):
         models.Answers.model_validate(data)
 
 
 @pytest.mark.parametrize("key", ["Ten1", "1ten", "ten_1"])
 def test_tenant_keys_must_be_lowercase(key):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         resman={"tenants": {key: {"descriptive_name": "Tenant"}}}
     )
     with pytest.raises(pydantic.ValidationError, match="Tenant key"):
@@ -128,7 +119,7 @@ def test_tenant_keys_must_be_lowercase(key):
 
 
 def test_tenant_with_locations():
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         resman={
             "tenants": {
                 "ten-1": {
@@ -147,22 +138,18 @@ def test_tenant_with_locations():
 def test_stage_keyed_fields_reject_unknown_stages(field):
     value = {"2-networking": {"x": "y"}}
     with pytest.raises(pydantic.ValidationError, match="Unknown stage"):
-        models.Answers.model_validate(
-            answer_fixtures.answer_data(**{field: value})
-        )
+        helpers.minimal_answers(**{field: value})
 
 
 @pytest.mark.parametrize("field", ["overrides", "imports"])
 def test_stage_keyed_fields_reject_aliases(field):
     with pytest.raises(pydantic.ValidationError, match="Unknown stage"):
-        models.Answers.model_validate(
-            answer_fixtures.answer_data(**{field: {"0": {}}})
-        )
+        helpers.minimal_answers(**{field: {"0": {}}})
 
 
 def test_imports_and_overrides_accept_every_stage():
-    address = "module.automation-project.google_project.project[0]"
-    data = answer_fixtures.answer_data(
+    address = conftest.AUTOMATION_ADDRESS
+    data = helpers.minimal_data(
         imports={
             stage: {address: "tst-prod-iac-core-0"} for stage in paths.STAGES
         },
@@ -174,13 +161,13 @@ def test_imports_and_overrides_accept_every_stage():
 
 
 def test_import_ids_must_not_be_empty():
-    data = answer_fixtures.answer_data(imports={"0-bootstrap": {"x.y": ""}})
+    data = helpers.minimal_data(imports={"0-bootstrap": {"x.y": ""}})
     with pytest.raises(pydantic.ValidationError):
         models.Answers.model_validate(data)
 
 
 def test_existing_org_policies_are_sorted_and_unique():
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         existing_org_policies=[
             "storage.uniformBucketLevelAccess",
             "iam.allowedPolicyMemberDomains",
@@ -192,12 +179,7 @@ def test_existing_org_policies_are_sorted_and_unique():
         "iam.allowedPolicyMemberDomains",
         "storage.uniformBucketLevelAccess",
     ]
-    assert (
-        models.Answers.model_validate(
-            answer_fixtures.answer_data()
-        ).existing_org_policies
-        == []
-    )
+    assert helpers.minimal_answers().existing_org_policies == []
 
 
 @pytest.mark.parametrize(
@@ -211,6 +193,6 @@ def test_existing_org_policies_are_sorted_and_unique():
     ],
 )
 def test_existing_org_policies_reject_non_constraints(name):
-    data = answer_fixtures.answer_data(existing_org_policies=[name])
+    data = helpers.minimal_data(existing_org_policies=[name])
     with pytest.raises(pydantic.ValidationError):
         models.Answers.model_validate(data)

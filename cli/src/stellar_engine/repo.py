@@ -31,8 +31,8 @@ import hcl2
 from packaging import version
 import yaml
 
-BOOTSTRAP_DIR = pathlib.Path("fast/stages-aw/0-bootstrap")
-RESMAN_DIR = pathlib.Path("fast/stages-aw/1-resman")
+from stellar_engine import paths
+from stellar_engine.render import hcl
 
 _SERVICES_RE = re.compile(r'^list_of_services="([^"]+)"', re.MULTILINE)
 _PREFIX_LIMIT_RE = re.compile(r"length\(var\.prefix\),\s*0\)\s*<=\s*(\d+)")
@@ -78,8 +78,8 @@ CUSTOM_CONSTRAINT_PREFIX = "custom."
 # `outputs-files.tf`; `fast/stage-links.sh` links both into Stage 1. Stage 0
 # reads no output files.
 _AUTO_TFVARS_LOCALS = {
-    "0-bootstrap": (),
-    "1-resman": ("tfvars", "tfvars_globals"),
+    paths.BOOTSTRAP: (),
+    paths.RESMAN: ("tfvars", "tfvars_globals"),
 }
 
 
@@ -109,6 +109,13 @@ class Stage0Project:
     name: str
     address: str
     count: str | None = None
+
+
+# The billing answers for which Stage 0 creates the billing export project,
+# as `billing_export_created` reads them, for messages about the rule.
+BILLING_EXPORT_CONDITION = (
+    "billing.no_iam is false and billing.is_org_level is true"
+)
 
 
 def billing_export_created(*, no_iam: bool, is_org_level: bool) -> bool:
@@ -226,16 +233,19 @@ class Holder:
     key: str | None = None
 
 
-def _unquote(value):
-    """Strips the HCL quoting that python-hcl2 keeps on strings and labels."""
-    if isinstance(value, str) and value.startswith('"') and value.endswith('"'):
-        return json.loads(value)
-    return value
-
-
 def _load_hcl(path):
     with path.open(encoding="utf-8") as handle:
         return hcl2.load(handle)
+
+
+@functools.cache
+def _stage_variables(root, stage):
+    parsed = _load_hcl(paths.stage_dir(root, stage) / "variables.tf")
+    return {
+        hcl.unquote(name): body
+        for block in parsed.get("variable", [])
+        for name, body in block.items()
+    }
 
 
 def _literal_map(value, name):
@@ -269,7 +279,7 @@ def find_root(start=None):
     candidates.append(pathlib.Path(__file__).resolve())
     for candidate in candidates:
         for directory in [candidate, *candidate.parents]:
-            if (directory / "fast" / "stages-aw").is_dir():
+            if (directory / paths.STAGES_DIR).is_dir():
                 return directory
     raise RepoError(
         "Cannot find the Stellar Engine repository root. Run the command "
@@ -290,16 +300,31 @@ class Repo:
     @property
     def bootstrap_dir(self):
         """Returns the Stage 0 bootstrap directory."""
-        return self.root / BOOTSTRAP_DIR
+        return paths.stage_dir(self.root, paths.BOOTSTRAP)
 
-    @functools.cached_property
+    @property
     def _bootstrap_variables(self):
-        parsed = _load_hcl(self.bootstrap_dir / "variables.tf")
-        variables = {}
-        for block in parsed.get("variable", []):
-            for name, body in block.items():
-                variables[_unquote(name)] = body
-        return variables
+        return self.stage_variables(paths.BOOTSTRAP)
+
+    def stage_variables(self, stage):
+        """Returns the variable blocks a stage declares in `variables.tf`.
+
+        Args:
+            stage: Stage directory name, such as `1-resman`.
+
+        Returns:
+            Variable name to its parsed block body, as python-hcl2 returns
+            it.
+        """
+        return _stage_variables(self.root, stage)
+
+    def stage_variable_names(self, stage):
+        """Returns the names of the variables a stage declares.
+
+        Args:
+            stage: Stage directory name, such as `1-resman`.
+        """
+        return frozenset(self.stage_variables(stage))
 
     def required_roles(self):
         """Returns the organization roles that `setIAM.sh` grants.
@@ -350,9 +375,9 @@ class Repo:
         Raises:
             RepoError: If the validation block cannot be found.
         """
-        text = (self.root / RESMAN_DIR / "variables.tf").read_text(
-            encoding="utf-8"
-        )
+        text = (
+            paths.stage_dir(self.root, paths.RESMAN) / "variables.tf"
+        ).read_text(encoding="utf-8")
         match = _TENANT_KEY_LIMIT_RE.search(text)
         if not match:
             raise RepoError("Cannot find the tenant key length validation")
@@ -372,12 +397,12 @@ class Repo:
     def regime_names(self):
         """Returns the compliance regimes in the Stage 0 `regime_mapping`."""
         default = self._bootstrap_variables["regime_mapping"].get("default", {})
-        return sorted(_unquote(name) for name in default)
+        return sorted(hcl.unquote(name) for name in default)
 
     def log_sink_names(self):
         """Returns the default organization log sink names."""
         default = self._bootstrap_variables["log_sinks"].get("default", {})
-        return sorted(_unquote(name) for name in default)
+        return sorted(hcl.unquote(name) for name in default)
 
     def custom_role_ids(self):
         """Returns the organization custom role IDs that Stage 0 creates.
@@ -478,7 +503,7 @@ class Repo:
         for block in _load_hcl(self.bootstrap_dir / filename).get("module", []):
             for label, body in block.items():
                 if "name" in body:
-                    names[_unquote(label)] = _unquote(body["name"])
+                    names[hcl.unquote(label)] = hcl.unquote(body["name"])
         return names
 
     def automation_service_accounts(self):
@@ -520,6 +545,27 @@ class Repo:
         """
         return self._stage0_projects
 
+    def created_stage0_projects(self, *, no_iam: bool, is_org_level: bool):
+        """Returns the projects Stage 0 creates for these billing answers.
+
+        Args:
+            no_iam: The `billing_account.no_iam` value.
+            is_org_level: The `billing_account.is_org_level` value.
+
+        Returns:
+            A list of `Stage0Project`, in `stage0_projects` order.
+
+        Raises:
+            RepoError: If a Stage 0 project has no project module.
+        """
+        return [
+            project
+            for project in self.stage0_projects()
+            if stage0_project_created(
+                project, no_iam=no_iam, is_org_level=is_org_level
+            )
+        ]
+
     @functools.cached_property
     def _stage0_projects(self):
         names = [
@@ -531,10 +577,10 @@ class Repo:
         project_main = _load_hcl(self.root / "modules/project/main.tf")
         for block in project_main.get("resource", []):
             for label, bodies in block.items():
-                if _unquote(label) != "google_project":
+                if hcl.unquote(label) != "google_project":
                     continue
                 for name, body in bodies.items():
-                    if _unquote(name) == "project":
+                    if hcl.unquote(name) == "project":
                         resource_index = _counted(body)
         projects = []
         for filename, module in names:
@@ -543,16 +589,16 @@ class Repo:
                 "module", []
             ):
                 for label, candidate in block.items():
-                    if _unquote(label) == module:
+                    if hcl.unquote(label) == module:
                         body = candidate
-            source = _unquote(body.get("source", "")) if body else ""
+            source = hcl.unquote(body.get("source", "")) if body else ""
             if body is None or not str(source).endswith(_PROJECT_MODULE_SOURCE):
                 raise RepoError(f"No Stage 0 project module {module}")
             count = body.get("count")
             projects.append(
                 Stage0Project(
                     module=module,
-                    name=_unquote(body["name"]),
+                    name=hcl.unquote(body["name"]),
                     address=(
                         f"module.{module}{_counted(body)}."
                         f"google_project.project{resource_index}"
@@ -586,14 +632,14 @@ class Repo:
             if not name.endswith("_bindings"):
                 continue
             for key, body in _literal_map(value, name).items():
-                holder = self._holder(_unquote(key), accounts)
+                holder = self._holder(hcl.unquote(key), accounts)
                 roles = body.get("authoritative", [])
                 if not isinstance(roles, list):
                     raise RepoError(f"Cannot read the roles of {key}")
                 for role in roles:
-                    bindings.setdefault(_unquote(role), set()).add(holder)
+                    bindings.setdefault(hcl.unquote(role), set()).add(holder)
         for role in local_values.get("iam_delete_roles", []):
-            bindings[_unquote(role)] = set()
+            bindings[hcl.unquote(role)] = set()
         return bindings
 
     @staticmethod
@@ -645,7 +691,7 @@ class Repo:
             value = local_values.get(name)
             if not isinstance(value, dict):
                 raise RepoError(f"Cannot read local.{name} in outputs.tf")
-            keys.update(_unquote(key) for key in value)
+            keys.update(hcl.unquote(key) for key in value)
         return frozenset(keys)
 
     def min_terraform_version(self):
@@ -660,7 +706,7 @@ class Repo:
         floors = []
         for path in (self.root / "modules").glob("*/versions.tf"):
             for block in _load_hcl(path).get("terraform", []):
-                constraint = _unquote(block.get("required_version", ""))
+                constraint = hcl.unquote(block.get("required_version", ""))
                 floors.extend(
                     version.Version(found)
                     for found in _VERSION_FLOOR_RE.findall(constraint)

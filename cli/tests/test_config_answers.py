@@ -15,24 +15,13 @@
 """Tests for loading, editing and saving answers.yaml."""
 
 import json
-import stat
 
 import pytest
 
-import answer_fixtures
 import conftest
-import render_fixtures
+import helpers
 from stellar_engine.config import answers as answers_lib
-from stellar_engine.config import models
 from stellar_engine.preflight import inputs as inputs_lib
-
-_PROJECT_ADDRESS = "module.automation-project.google_project.project[0]"
-
-
-def _answers(**overrides):
-    return models.Answers.model_validate(
-        answer_fixtures.answer_data(**overrides)
-    )
 
 
 @pytest.fixture
@@ -40,26 +29,24 @@ def answers_path(tmp_path):
     return tmp_path / "home" / "envs" / "tst" / "answers.yaml"
 
 
-def _mode(path):
-    return stat.S_IMODE(path.stat().st_mode)
-
-
 def test_save_and_load_round_trip(answers_path):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         bootstrap_user=conftest.USER,
         resman={"tenants": {"ten1": {"descriptive_name": "Tenant"}}},
-        imports={"0-bootstrap": {_PROJECT_ADDRESS: "tst-prod-iac-core-0"}},
+        imports={
+            "0-bootstrap": {conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0"}
+        },
         overrides={"0-bootstrap": {"iam": {"roles/browser": ["domain:x"]}}},
     )
     schema = answers_path.parents[2] / "answers.schema.json"
-    answers_lib.save(answers_path, answers, schema_path=schema)
+    answers_lib.save(answers_path, answers, home=answers_path.parents[2])
     assert answers_lib.load(answers_path) == answers
     text = answers_path.read_text(encoding="utf-8")
     assert text.splitlines()[0] == answers_lib.SCHEMA_COMMENT
     assert text.count(answers_lib.SCHEMA_COMMENT) == 1
     # Derived values stay unset in the file.
     assert "kms_protection_level" not in text
-    assert _mode(answers_path) == 0o600
+    assert conftest.mode(answers_path) == 0o600
     assert json.loads(schema.read_text(encoding="utf-8"))["properties"]
 
 
@@ -72,7 +59,7 @@ def test_schema_comment_points_at_home_schema(answers_path):
 
 
 def test_save_keeps_operator_comments(answers_path):
-    answers_lib.save(answers_path, _answers())
+    answers_lib.save(answers_path, helpers.minimal_answers())
     text = answers_path.read_text(encoding="utf-8")
     text = text.replace(
         "region: us-east4",
@@ -105,9 +92,11 @@ def test_save_keeps_operator_comments(answers_path):
 
 
 def test_save_drops_keys_that_become_unset(answers_path):
-    answers_lib.save(answers_path, _answers(kms_protection_level="HSM"))
+    answers_lib.save(
+        answers_path, helpers.minimal_answers(kms_protection_level="HSM")
+    )
     previous = answers_lib.load_data(answers_path)
-    answers_lib.save(answers_path, _answers(), previous=previous)
+    answers_lib.save(answers_path, helpers.minimal_answers(), previous=previous)
     assert "kms_protection_level" not in answers_path.read_text(
         encoding="utf-8"
     )
@@ -128,7 +117,7 @@ def _save_without(path, *keys):
 
 def _il5_answers(answers_path, replacements):
     answers_path.parent.mkdir(parents=True)
-    text = (render_fixtures.ANSWERS_DIR / "il5.yaml").read_text("utf-8")
+    text = (helpers.ANSWERS_DIR / "il5.yaml").read_text("utf-8")
     for old, new in replacements:
         assert old in text
         text = text.replace(old, new)
@@ -185,9 +174,11 @@ def test_nested_comment_survives_removal_of_previous_nested_key(
 
 
 def test_save_does_not_modify_previous(answers_path):
-    answers_lib.save(answers_path, _answers())
+    answers_lib.save(answers_path, helpers.minimal_answers())
     previous = answers_lib.load_data(answers_path)
-    answers_lib.save(answers_path, _answers(prefix="abc"), previous=previous)
+    answers_lib.save(
+        answers_path, helpers.minimal_answers(prefix="abc"), previous=previous
+    )
     assert previous["prefix"] == "tst"
 
 
@@ -195,8 +186,8 @@ def test_save_replaces_atomically_with_private_mode(answers_path):
     answers_path.parent.mkdir(parents=True)
     answers_path.write_text("old: true\n", encoding="utf-8")
     answers_path.chmod(0o644)
-    answers_lib.save(answers_path, _answers())
-    assert _mode(answers_path) == 0o600
+    answers_lib.save(answers_path, helpers.minimal_answers())
+    assert conftest.mode(answers_path) == 0o600
     assert [path.name for path in answers_path.parent.iterdir()] == [
         "answers.yaml"
     ]
@@ -204,17 +195,17 @@ def test_save_replaces_atomically_with_private_mode(answers_path):
 
 def test_save_rejects_values_inside_the_home(answers_path):
     home = answers_path.parents[2]
-    answers = _answers(
+    answers = helpers.minimal_answers(
         overrides={"0-bootstrap": {"outputs_location": str(home / "x")}}
     )
     with pytest.raises(answers_lib.AnswersError, match="points into the home"):
-        answers_lib.save(answers_path, answers)
+        answers_lib.save(answers_path, answers, home=home)
     assert not answers_path.exists()
 
 
-def test_save_outside_a_home_skips_the_home_check(tmp_path):
+def test_save_without_a_home_skips_the_home_check(tmp_path):
     path = tmp_path / "answers.yaml"
-    answers = _answers(
+    answers = helpers.minimal_answers(
         overrides={"0-bootstrap": {"outputs_location": str(tmp_path)}}
     )
     answers_lib.save(path, answers)
@@ -294,14 +285,14 @@ def test_apply_sets_quoted_segments_hold_addresses():
     result = answers_lib.apply_sets(
         {},
         [
-            f'imports.0-bootstrap."{_PROJECT_ADDRESS}"=tst-prod-iac-core-0',
+            f'imports.0-bootstrap."{conftest.AUTOMATION_ADDRESS}"=tst-prod-iac-core-0',
             'imports.0-bootstrap."module.a[\\"k=v\\"].x.y"=id=with=equals',
         ],
     )
     assert result == {
         "imports": {
             "0-bootstrap": {
-                _PROJECT_ADDRESS: "tst-prod-iac-core-0",
+                conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0",
                 'module.a["k=v"].x.y': "id=with=equals",
             }
         }
@@ -310,7 +301,7 @@ def test_apply_sets_quoted_segments_hold_addresses():
 
 def test_apply_sets_result_validates():
     data = answers_lib.apply_sets(
-        answer_fixtures.answer_data(),
+        helpers.minimal_data(),
         ["organization.id=123456789012", "billing.no_iam=true"],
     )
     answers = answers_lib.parse(data)
@@ -405,7 +396,7 @@ def test_from_config_env_missing_file(tmp_path):
 
 
 def test_to_preflight():
-    answers = _answers(
+    answers = helpers.minimal_answers(
         bootstrap_user=conftest.USER,
         billing={"account_id": conftest.BILLING, "no_iam": True},
         groups={"gcp-devops": "platform"},
@@ -415,10 +406,8 @@ def test_to_preflight():
         },
         imports={
             "0-bootstrap": {
-                _PROJECT_ADDRESS: "tst-prod-iac-core-0",
-                "module.log-export-project.google_project.project[0]": (
-                    "tst-prod-audit-logs-0"
-                ),
+                conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0",
+                conftest.LOG_EXPORT_ADDRESS: ("tst-prod-audit-logs-0"),
                 "module.x.google_storage_bucket.bucket[0]": "a-bucket",
             },
             "1-resman": {
@@ -456,7 +445,7 @@ def test_to_preflight():
 
 
 def test_to_preflight_fits_preflight_inputs():
-    values = answers_lib.to_preflight(_answers())
+    values = answers_lib.to_preflight(helpers.minimal_answers())
     assert "bootstrap_user" not in values
     known = set(inputs_lib.PreflightInputs.model_fields)
     # The preflight slice of this change adds the two tuple fields.

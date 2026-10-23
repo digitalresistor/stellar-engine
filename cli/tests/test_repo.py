@@ -20,12 +20,12 @@ a way the CLI must follow, or the documentation drifted from the code.
 
 import json
 import re
-import shutil
 import subprocess
 
 import pytest
 
 import conftest
+from stellar_engine import paths
 from stellar_engine import repo as repo_lib
 from stellar_engine.preflight import checks
 from stellar_engine.preflight import regions
@@ -45,7 +45,7 @@ def _slug(heading):
 
 
 def test_find_root_from_nested_directory(repo):
-    nested = repo.root / "fast/stages-aw/0-bootstrap"
+    nested = repo.bootstrap_dir
     assert repo_lib.find_root(nested) == repo.root
 
 
@@ -83,17 +83,17 @@ def test_ddg_requires_monitoring_api(repo):
 
 
 def test_prefix_limit_matches_resman(repo):
-    resman = (repo.root / "fast/stages-aw/1-resman/variables.tf").read_text(
-        encoding="utf-8"
-    )
+    resman = (
+        paths.stage_dir(repo.root, paths.RESMAN) / "variables.tf"
+    ).read_text(encoding="utf-8")
     assert repo.prefix_max_length() == 7
     assert "Use a maximum of 7 characters for prefix." in resman
 
 
 def test_tenant_key_limit_matches_resman(repo):
-    variables = (repo.root / repo_lib.RESMAN_DIR / "variables.tf").read_text(
-        encoding="utf-8"
-    )
+    variables = (
+        paths.stage_dir(repo.root, paths.RESMAN) / "variables.tf"
+    ).read_text(encoding="utf-8")
     assert repo.tenant_key_max_length() == 6
     assert "Tenant keys must be less than 7 characters." in variables
 
@@ -103,7 +103,7 @@ def test_tenant_key_limit_matches_resman(repo):
     [("length(k) < 9", 8), ("length(k) <= 9", 9)],
 )
 def test_tenant_key_limit_reads_both_bounds(tmp_path, condition, limit):
-    resman = tmp_path / repo_lib.RESMAN_DIR
+    resman = paths.stage_dir(tmp_path, paths.RESMAN)
     resman.mkdir(parents=True)
     (resman / "variables.tf").write_text(
         'variable "tenants" {\n  validation {\n'
@@ -115,7 +115,7 @@ def test_tenant_key_limit_reads_both_bounds(tmp_path, condition, limit):
 
 
 def test_tenant_key_limit_missing_raises(tmp_path):
-    resman = tmp_path / repo_lib.RESMAN_DIR
+    resman = paths.stage_dir(tmp_path, paths.RESMAN)
     resman.mkdir(parents=True)
     (resman / "variables.tf").write_text("", encoding="utf-8")
     with pytest.raises(repo_lib.RepoError):
@@ -175,7 +175,7 @@ def test_declared_org_policies_read_templated_files(repo):
 
 
 def test_declared_org_policies_follow_the_file_pattern(tmp_path):
-    bootstrap = tmp_path / repo_lib.BOOTSTRAP_DIR
+    bootstrap = paths.stage_dir(tmp_path, paths.BOOTSTRAP)
     plain = bootstrap / "data/org-policies"
     templated = bootstrap / "data/custom-org-policies"
     plain.mkdir(parents=True)
@@ -275,9 +275,6 @@ _TEMPLATE_VARS = (
 
 
 @pytest.mark.terraform
-@pytest.mark.skipif(
-    shutil.which("terraform") is None, reason="terraform is missing"
-)
 @pytest.mark.parametrize("regime", ["FEDRAMP_MODERATE", "IL5"])
 def test_templated_keys_match_templatefile(repo, regime, tmp_path):
     # Sync test: Terraform renders the templated files the way
@@ -325,7 +322,7 @@ def test_conditional_bindings_keep_their_holders(repo):
 
 
 def _write_stage0(root, organization_iam):
-    bootstrap = root / repo_lib.BOOTSTRAP_DIR
+    bootstrap = paths.stage_dir(root, paths.BOOTSTRAP)
     bootstrap.mkdir(parents=True)
     (bootstrap / "automation.tf").write_text(
         'module "automation-project" { source = "x"\n name = "iac-core-0" }\n'

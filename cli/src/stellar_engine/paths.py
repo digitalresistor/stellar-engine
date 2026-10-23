@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Locates the stellar home, its environments and the engine checkout.
+"""Locates the stellar home, its environments and their stage workspaces.
 
 Every answer, workspace, hash, log and Stage 0 output of a deployment lives
 under one home folder, so pointing a deployment elsewhere takes one flag or
@@ -26,11 +26,14 @@ import dataclasses
 import enum
 import pathlib
 import re
-import subprocess
-from typing import Protocol
+
+from stellar_engine import patterns
 
 STAGES: tuple[str, ...] = ("0-bootstrap", "1-resman")
+BOOTSTRAP, RESMAN = STAGES
 STAGE_ALIASES: dict[str, str] = {stage.split("-")[0]: stage for stage in STAGES}
+# Where the stages live, in the engine checkout and in each environment.
+STAGES_DIR = pathlib.PurePosixPath("fast/stages-aw")
 
 HOME_DIRNAME = ".stellar"
 HOME_ENV_VAR = "STELLAR_HOME"
@@ -46,10 +49,10 @@ GITIGNORE = """\
 !/envs/*/answers.yaml
 """
 
-# An environment directory name is a prefix. Length limits belong to the
-# answers validation, which reads them from the repository.
-_ENV_NAME_RE = re.compile(r"^[a-z][a-z0-9]*$")
-_GIT_TIMEOUT_SECONDS = 30
+# An environment directory name is a prefix, and every command accepts the
+# same prefixes. Length limits belong to the answers validation, which reads
+# them from the repository.
+PREFIX_RE = re.compile(patterns.PREFIX)
 _PRIVATE_DIR_MODE = 0o700
 
 
@@ -96,6 +99,19 @@ def resolve_stage(name: str) -> str:
         return STAGE_ALIASES[name]
     known = ", ".join([*STAGES, *STAGE_ALIASES])
     raise ValueError(f"Unknown stage {name!r}; expected one of {known}")
+
+
+def stage_dir(root: pathlib.Path, stage: str) -> pathlib.Path:
+    """Returns the directory of a stage under an engine or environment root.
+
+    Args:
+        root: Root of the engine checkout or of an environment.
+        stage: A stage name or alias.
+
+    Raises:
+        ValueError: If the stage is unknown.
+    """
+    return pathlib.Path(root) / STAGES_DIR / resolve_stage(stage)
 
 
 def resolve_home(
@@ -145,85 +161,6 @@ def make_private_dir(path: pathlib.Path) -> None:
         directory.mkdir(mode=_PRIVATE_DIR_MODE)
         # The umask may strip bits from the requested mode.
         directory.chmod(_PRIVATE_DIR_MODE)
-
-
-@dataclasses.dataclass(frozen=True)
-class EngineInfo:
-    """Version facts about an engine checkout.
-
-    Attributes:
-        root: Root of the checkout.
-        commit: Full commit hash of HEAD, or None when not a git checkout.
-        tag: Tag that points exactly at HEAD, or None.
-        dirty: Whether tracked files have uncommitted changes, or None when
-            git cannot tell.
-    """
-
-    root: pathlib.Path
-    commit: str | None
-    tag: str | None
-    dirty: bool | None
-
-
-class EngineSource(Protocol):
-    """A source of the Terraform code that workspaces link to."""
-
-    @property
-    def root(self) -> pathlib.Path:
-        """Returns the root of the engine code."""
-        ...
-
-    def describe(self) -> EngineInfo:
-        """Returns version facts recorded with each apply."""
-        ...
-
-
-def _git(root, *args):
-    """Runs git in a checkout and returns stdout, or None on any failure."""
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(root), *args],
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except OSError, subprocess.SubprocessError:
-        return None
-    return completed.stdout
-
-
-@dataclasses.dataclass(frozen=True)
-class LocalCheckout:
-    """An engine that is a local git checkout of Stellar Engine.
-
-    Attributes:
-        root: Root of the checkout.
-    """
-
-    root: pathlib.Path
-
-    def describe(self) -> EngineInfo:
-        """Returns the commit, exact tag and dirty flag of the checkout.
-
-        Untracked files do not make the checkout dirty, because operator
-        scratch files such as editor folders would otherwise always flag it.
-
-        Returns:
-            The engine facts; fields git cannot provide are None.
-        """
-        commit = (_git(self.root, "rev-parse", "HEAD") or "").strip() or None
-        tag = None
-        dirty = None
-        if commit is not None:
-            tag = (
-                _git(self.root, "describe", "--tags", "--exact-match") or ""
-            ).strip() or None
-            status = _git(
-                self.root, "status", "--porcelain", "--untracked-files=no"
-            )
-            dirty = None if status is None else bool(status.strip())
-        return EngineInfo(self.root, commit, tag, dirty)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -288,7 +225,7 @@ class EnvPaths:
     @property
     def stages_dir(self) -> pathlib.Path:
         """Returns the directory that holds the stage workspaces."""
-        return self.root / "fast" / "stages-aw"
+        return self.root / STAGES_DIR
 
     def workspace(self, stage: str) -> pathlib.Path:
         """Returns the workspace directory of a stage.
@@ -299,7 +236,7 @@ class EnvPaths:
         Raises:
             ValueError: If the stage is unknown.
         """
-        return self.stages_dir / resolve_stage(stage)
+        return stage_dir(self.root, stage)
 
     def generated_hash(self, stage: str) -> pathlib.Path:
         """Returns the hash file of the last tfvars rendered for a stage.
@@ -394,8 +331,7 @@ class Home:
         return sorted(
             path.name
             for path in self.envs_dir.iterdir()
-            if _ENV_NAME_RE.match(path.name)
-            and (path / "answers.yaml").is_file()
+            if PREFIX_RE.match(path.name) and (path / "answers.yaml").is_file()
         )
 
     def env(self, prefix: str) -> EnvPaths:
@@ -410,6 +346,25 @@ class Home:
         _check_env_name(prefix)
         return EnvPaths(self.envs_dir / prefix, prefix)
 
+    def stale_current_message(self) -> str | None:
+        """Returns why the current environment no longer exists, if it does not.
+
+        `current` keeps naming an environment after someone deletes its
+        directory by hand.
+
+        Returns:
+            The explanation, or None when no environment is current or the
+            current one exists.
+        """
+        current = self.current()
+        if current is None or current in self.list_envs():
+            return None
+        return (
+            f"The current environment {current} no longer exists in "
+            f"{self.root}. Run `stellar env list` to see the environments and "
+            "`stellar env use PREFIX` to pick one, or pass --prefix."
+        )
+
     def resolve_prefix(self, prefix: str | None) -> str:
         """Returns the given prefix, or the active one when none is given.
 
@@ -417,7 +372,8 @@ class Home:
             prefix: Value of the `--prefix` flag, or None.
 
         Raises:
-            NoEnvironmentError: If no prefix is given and none is active.
+            NoEnvironmentError: If no prefix is given and none is active,
+                or the active one no longer exists.
         """
         if prefix:
             return prefix
@@ -428,6 +384,9 @@ class Home:
                 "to create one, `stellar env use PREFIX` to select one, or "
                 "pass --prefix."
             )
+        stale = self.stale_current_message()
+        if stale is not None:
+            raise NoEnvironmentError(stale)
         return current
 
 
@@ -438,7 +397,7 @@ def _check_env_name(prefix):
         ValueError: If the prefix does not match the environment name
             pattern.
     """
-    if not _ENV_NAME_RE.match(prefix):
+    if not PREFIX_RE.match(prefix):
         raise ValueError(
             f"Invalid prefix {prefix!r}: use lowercase letters and digits, "
             "starting with a letter"

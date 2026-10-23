@@ -19,7 +19,7 @@ import re
 
 import pytest
 
-import answer_fixtures
+import helpers
 from stellar_engine import paths
 from stellar_engine.config import answers as answers_lib
 from stellar_engine.config import models
@@ -27,7 +27,7 @@ from stellar_engine.config import seed
 
 
 def _source(**overrides):
-    return answer_fixtures.answer_data(
+    return helpers.minimal_data(
         engine={"path": "/opt/engine"},
         groups={"gcp-devops": "platform"},
         resman={"tenants": {"ten1": {"descriptive_name": "Tenant"}}},
@@ -99,9 +99,7 @@ def test_review_notes_on_regime_change():
 
 
 def test_review_notes_quiet_when_nothing_is_explicit():
-    source = answer_fixtures.answer_data(
-        compliance={"regime": "FEDRAMP_MODERATE"}
-    )
+    source = helpers.minimal_data(compliance={"regime": "FEDRAMP_MODERATE"})
     assert seed.review_notes(source, "IL4") == []
 
 

@@ -14,25 +14,19 @@
 
 """Tests for the Terraform import blocks of pre-created resources."""
 
-import shutil
-import stat
-
 import hcl2
 import pytest
 
 import conftest
-import render_fixtures
+import helpers
 from stellar_engine import workspace
 from stellar_engine.render import imports
-
-_AUTOMATION = "module.automation-project.google_project.project[0]"
-_LOGGING = "module.log-export-project.google_project.project[0]"
-_BILLING = "module.billing-export-project[0].google_project.project[0]"
+from stellar_engine.render import writer
 
 
 def _with_imports(name="lab", stage="0-bootstrap", entries=None, **updates):
     data = {stage: entries} if entries is not None else {}
-    return render_fixtures.load_answers(name, imports=data, **updates)
+    return helpers.load_fixture(name, imports=data, **updates)
 
 
 def test_filename():
@@ -43,7 +37,7 @@ def test_filename():
 
 
 def test_dumps_snapshot(snapshot):
-    answers = render_fixtures.load_answers("lab")
+    answers = helpers.load_fixture("lab")
     text = imports.dumps(
         answers.imports["0-bootstrap"],
         imports.header("0-bootstrap", answers.prefix),
@@ -59,14 +53,12 @@ _POLICIES = [
 
 
 def test_text_with_org_policies_snapshot(snapshot):
-    answers = render_fixtures.load_answers(
-        "lab", existing_org_policies=_POLICIES
-    )
+    answers = helpers.load_fixture("lab", existing_org_policies=_POLICIES)
     assert imports.text(answers, "0") == snapshot
 
 
 def test_text_without_org_policies_matches_dumps():
-    answers = render_fixtures.load_answers("lab")
+    answers = helpers.load_fixture("lab")
     assert imports.text(answers, "0-bootstrap") == imports.dumps(
         answers.imports["0-bootstrap"], imports.header("0", answers.prefix)
     )
@@ -77,7 +69,7 @@ def test_text_with_only_org_policies():
     text = imports.text(answers, "0")
     assert text.startswith(
         "# stellar render writes this file from envs/lab1/answers.yaml "
-        "imports.0-bootstrap and existing_org_policies.\n"
+        "existing_org_policies.\n"
     )
     parsed = hcl2.loads(text)
     assert len(parsed["import"]) == 1
@@ -105,22 +97,36 @@ def test_text_puts_org_policies_only_in_stage0():
 
 
 def test_dumps_sorts_and_quotes():
-    text = imports.dumps({_LOGGING: "b", _AUTOMATION: 'a"${x}'}, ["# header"])
+    text = imports.dumps(
+        {
+            conftest.LOG_EXPORT_ADDRESS: "b",
+            conftest.AUTOMATION_ADDRESS: 'a"${x}',
+        },
+        ["# header"],
+    )
     assert text == (
         "# header\n\n"
         "import {\n"
-        f"  to = {_AUTOMATION}\n"
+        f"  to = {conftest.AUTOMATION_ADDRESS}\n"
         '  id = "a\\"$${x}"\n'
         "}\n\n"
         "import {\n"
-        f"  to = {_LOGGING}\n"
+        f"  to = {conftest.LOG_EXPORT_ADDRESS}\n"
         '  id = "b"\n'
         "}\n"
     )
 
 
 def test_dumps_parses_as_hcl():
-    parsed = hcl2.loads(imports.dumps({_BILLING: "p", _AUTOMATION: "q"}, []))
+    parsed = hcl2.loads(
+        imports.dumps(
+            {
+                conftest.BILLING_EXPORT_ADDRESS: "p",
+                conftest.AUTOMATION_ADDRESS: "q",
+            },
+            [],
+        )
+    )
     assert [block["id"] for block in parsed["import"]] == ['"q"', '"p"']
 
 
@@ -144,55 +150,61 @@ def test_dumps_rejects_invalid_address(address):
         imports.dumps({address: "id"}, [])
 
 
-def test_valid_address_forms():
+def test_valid_address_forms(repo):
     answers = _with_imports(
         entries={
-            _BILLING: "p",
+            conftest.BILLING_EXPORT_ADDRESS: "p",
             'module.a["k"].google_project.project["x"]': "q",
             "google_project.plain": "r",
         },
         billing={"account_id": conftest.BILLING},
     )
-    assert imports.validate(answers, "0") == []
+    assert imports.dumps(answers.imports["0-bootstrap"], [])
+    assert imports.warnings(answers, "0", repo) == []
 
 
-def test_problems_name_the_stage():
-    answers = _with_imports(entries={"module.only": "x"})
-    found = imports.problems(answers, "0")
-    assert len(found) == 1
-    assert found[0].startswith("imports.0-bootstrap: ")
-    assert imports.warnings(answers, "0") == []
-
-
-def test_warns_on_billing_export_without_billing_iam():
-    answers = _with_imports(entries={_BILLING: "lab1-prod-billing-exp-0"})
-    assert answers.billing.no_iam
-    found = imports.validate(answers, "0-bootstrap")
-    assert len(found) == 1
-    assert found[0].startswith(imports.WARNING_PREFIX)
-    assert "billing.no_iam" in found[0]
-    assert imports.problems(answers, "0-bootstrap") == []
-
-
-def test_warns_on_billing_export_outside_the_org():
-    answers = _with_imports("il4", entries={_BILLING: "il4-prod-billing-exp-0"})
-    assert len(imports.warnings(answers, "0")) == 1
-
-
-def test_no_warning_when_billing_export_exists():
+def test_warns_on_billing_export_without_billing_iam(repo):
     answers = _with_imports(
-        entries={_BILLING: "lab1-prod-billing-exp-0"},
+        entries={conftest.BILLING_EXPORT_ADDRESS: "lab1-prod-billing-exp-0"}
+    )
+    assert answers.billing.no_iam
+    found = imports.warnings(answers, "0-bootstrap", repo)
+    assert len(found) == 1
+    assert found[0].startswith(
+        f"imports.0-bootstrap: {conftest.BILLING_EXPORT_ADDRESS} targets"
+    )
+    assert "billing.no_iam" in found[0]
+
+
+def test_warns_on_billing_export_outside_the_org(repo):
+    answers = _with_imports(
+        "il4",
+        entries={conftest.BILLING_EXPORT_ADDRESS: "il4-prod-billing-exp-0"},
+    )
+    assert len(imports.warnings(answers, "0", repo)) == 1
+
+
+def test_no_warning_when_billing_export_exists(repo):
+    answers = _with_imports(
+        entries={conftest.BILLING_EXPORT_ADDRESS: "lab1-prod-billing-exp-0"},
         billing={"account_id": conftest.BILLING},
     )
-    assert imports.validate(answers, "0") == []
+    assert imports.warnings(answers, "0", repo) == []
+
+
+def test_no_warning_for_other_stages(repo):
+    answers = _with_imports(
+        stage="1-resman",
+        entries={conftest.BILLING_EXPORT_ADDRESS: "lab1-prod-billing-exp-0"},
+    )
+    assert imports.warnings(answers, "1", repo) == []
 
 
 def test_write_creates_file(tmp_path):
-    answers = render_fixtures.load_answers("lab")
-    path = imports.write(tmp_path, "0", answers)
-    assert path is not None
-    assert path == tmp_path / "0-bootstrap-imports.tf"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    answers = helpers.load_fixture("lab")
+    assert imports.write(tmp_path, "0", answers) == writer.Outcome.CREATED
+    path = tmp_path / "0-bootstrap-imports.tf"
+    assert conftest.mode(path) == 0o644
     text = path.read_text(encoding="utf-8")
     assert text == imports.dumps(
         answers.imports["0-bootstrap"], imports.header("0", "lab1")
@@ -204,18 +216,22 @@ def test_write_creates_file(tmp_path):
 
 
 def test_write_replaces_generated_file(tmp_path):
-    imports.write(tmp_path, "0", render_fixtures.load_answers("lab"))
-    answers = _with_imports(entries={_AUTOMATION: "other-id"})
-    path = imports.write(tmp_path, "0", answers)
-    assert path is not None
+    lab = helpers.load_fixture("lab")
+    imports.write(tmp_path, "0", lab)
+    assert imports.write(tmp_path, "0", lab) == writer.Outcome.UNCHANGED
+    answers = _with_imports(entries={conftest.AUTOMATION_ADDRESS: "other-id"})
+    assert imports.write(tmp_path, "0", answers) == writer.Outcome.UPDATED
+    path = tmp_path / imports.filename("0")
     assert '"other-id"' in path.read_text(encoding="utf-8")
-    assert _LOGGING not in path.read_text(encoding="utf-8")
+    assert conftest.LOG_EXPORT_ADDRESS not in path.read_text(encoding="utf-8")
 
 
 def test_write_removes_generated_file_when_empty(tmp_path):
-    path = imports.write(tmp_path, "0", render_fixtures.load_answers("lab"))
-    assert path is not None
-    assert imports.write(tmp_path, "0", _with_imports()) is None
+    imports.write(tmp_path, "0", helpers.load_fixture("lab"))
+    path = tmp_path / imports.filename("0")
+    assert imports.write(tmp_path, "0", _with_imports()) == (
+        writer.Outcome.REMOVED
+    )
     assert not path.exists()
     # Nothing to remove the second time.
     assert imports.write(tmp_path, "0", _with_imports()) is None
@@ -223,31 +239,30 @@ def test_write_removes_generated_file_when_empty(tmp_path):
 
 def test_write_with_only_org_policies(tmp_path):
     answers = _with_imports(existing_org_policies=_POLICIES)
-    path = imports.write(tmp_path, "0", answers)
-    assert path is not None
+    assert imports.write(tmp_path, "0", answers) == writer.Outcome.CREATED
+    path = tmp_path / imports.filename("0")
     assert path.read_text(encoding="utf-8") == imports.text(answers, "0")
     # Clearing the policies removes the generated file again.
-    assert imports.write(tmp_path, "0", _with_imports()) is None
+    assert imports.write(tmp_path, "0", _with_imports()) == (
+        writer.Outcome.REMOVED
+    )
     assert not path.exists()
 
 
 def test_write_drops_org_policies_and_keeps_projects(tmp_path):
-    with_policies = render_fixtures.load_answers(
-        "lab", existing_org_policies=_POLICIES
-    )
-    path = imports.write(tmp_path, "0", with_policies)
-    assert path is not None
+    with_policies = helpers.load_fixture("lab", existing_org_policies=_POLICIES)
+    imports.write(tmp_path, "0", with_policies)
+    path = tmp_path / imports.filename("0")
     assert "stellar_existing_org_policies" in path.read_text(encoding="utf-8")
-    imports.write(tmp_path, "0", render_fixtures.load_answers("lab"))
+    imports.write(tmp_path, "0", helpers.load_fixture("lab"))
     text = path.read_text(encoding="utf-8")
     assert "stellar_existing_org_policies" not in text
-    assert _AUTOMATION in text
+    assert conftest.AUTOMATION_ADDRESS in text
 
 
 def test_write_ignores_other_stages(tmp_path):
     assert (
-        imports.write(tmp_path, "1-resman", render_fixtures.load_answers("lab"))
-        is None
+        imports.write(tmp_path, "1-resman", helpers.load_fixture("lab")) is None
     )
     assert list(tmp_path.iterdir()) == []
 
@@ -256,7 +271,7 @@ def test_write_refuses_operator_file(tmp_path):
     target = tmp_path / "0-bootstrap-imports.tf"
     target.write_text("# mine\n", encoding="utf-8")
     with pytest.raises(imports.ImportBlockError, match="did not write"):
-        imports.write(tmp_path, "0", render_fixtures.load_answers("lab"))
+        imports.write(tmp_path, "0", helpers.load_fixture("lab"))
     assert target.read_text(encoding="utf-8") == "# mine\n"
 
 
@@ -270,12 +285,14 @@ def test_write_keeps_operator_file_when_empty(tmp_path):
 def test_write_refuses_symlink(tmp_path):
     real = tmp_path / "real.tf"
     real.write_text(
-        imports.dumps({_AUTOMATION: "x"}, imports.header("0", "lab1")),
+        imports.dumps(
+            {conftest.AUTOMATION_ADDRESS: "x"}, imports.header("0", "lab1")
+        ),
         encoding="utf-8",
     )
     (tmp_path / "0-bootstrap-imports.tf").symlink_to(real)
     with pytest.raises(imports.ImportBlockError):
-        imports.write(tmp_path, "0", render_fixtures.load_answers("lab"))
+        imports.write(tmp_path, "0", helpers.load_fixture("lab"))
 
 
 def test_write_rejects_invalid_address(tmp_path):
@@ -286,11 +303,11 @@ def test_write_rejects_invalid_address(tmp_path):
 
 
 def test_workspace_sync_keeps_imports_file(tmp_path):
-    answers = render_fixtures.load_answers("lab")
-    env = render_fixtures.env_paths(answers, home=tmp_path)
+    answers = helpers.load_fixture("lab")
+    env = helpers.env_paths(answers, home=tmp_path)
     workspace.sync(env, conftest.REPO_ROOT, "0-bootstrap")
-    path = imports.write(env.workspace("0"), "0", answers)
-    assert path is not None
+    imports.write(env.workspace("0"), "0", answers)
+    path = env.workspace("0") / imports.filename("0")
     report = workspace.sync(env, conftest.REPO_ROOT, "0-bootstrap")
     assert path.name not in report.removed + report.conflicts
     assert path.is_file()
@@ -298,55 +315,41 @@ def test_workspace_sync_keeps_imports_file(tmp_path):
 
 
 @pytest.mark.terraform
-@pytest.mark.skipif(
-    shutil.which("terraform") is None,
-    reason="terraform is missing",
-)
 def test_imports_validate_in_bootstrap_workspace(tmp_path):
     answers = _with_imports(
         entries={
-            _AUTOMATION: "lab1-prod-iac-core-0",
-            _LOGGING: "lab1-prod-audit-logs-0",
-            _BILLING: "lab1-prod-billing-exp-0",
+            conftest.AUTOMATION_ADDRESS: "lab1-prod-iac-core-0",
+            conftest.LOG_EXPORT_ADDRESS: "lab1-prod-audit-logs-0",
+            conftest.BILLING_EXPORT_ADDRESS: "lab1-prod-billing-exp-0",
         }
     )
-    env = render_fixtures.env_paths(answers, home=tmp_path)
+    env = helpers.env_paths(answers, home=tmp_path)
     workspace.sync(env, conftest.REPO_ROOT, "0-bootstrap")
     ws = env.workspace("0-bootstrap")
     imports.write(ws, "0", answers)
-    init = render_fixtures.terraform(
-        ws, "init", "-backend=false", "-input=false"
-    )
+    init = helpers.terraform(ws, "init", "-backend=false", "-input=false")
     assert init.returncode == 0, init.stderr
-    validate = render_fixtures.terraform(ws, "validate")
+    validate = helpers.terraform(ws, "validate")
     assert validate.returncode == 0, validate.stderr
     # The same check rejects an address the configuration does not define,
     # so the success above proves the addresses are real.
     wrong = _with_imports(entries={"module.no-such.google_project.p": "x"})
     imports.write(ws, "0", wrong)
-    invalid = render_fixtures.terraform(ws, "validate")
+    invalid = helpers.terraform(ws, "validate")
     assert invalid.returncode != 0
     assert "no-such" in invalid.stderr + invalid.stdout
 
 
 @pytest.mark.terraform
-@pytest.mark.skipif(
-    shutil.which("terraform") is None,
-    reason="terraform is missing",
-)
 def test_org_policy_imports_validate_in_bootstrap_workspace(tmp_path):
-    answers = render_fixtures.load_answers(
-        "lab", existing_org_policies=_POLICIES
-    )
-    env = render_fixtures.env_paths(answers, home=tmp_path)
+    answers = helpers.load_fixture("lab", existing_org_policies=_POLICIES)
+    env = helpers.env_paths(answers, home=tmp_path)
     workspace.sync(env, conftest.REPO_ROOT, "0-bootstrap")
     ws = env.workspace("0-bootstrap")
     imports.write(ws, "0", answers)
-    init = render_fixtures.terraform(
-        ws, "init", "-backend=false", "-input=false"
-    )
+    init = helpers.terraform(ws, "init", "-backend=false", "-input=false")
     assert init.returncode == 0, init.stderr
-    validate = render_fixtures.terraform(ws, "validate")
+    validate = helpers.terraform(ws, "validate")
     assert validate.returncode == 0, validate.stderr + validate.stdout
-    fmt = render_fixtures.terraform(ws, "fmt", "-check", imports.filename("0"))
+    fmt = helpers.terraform(ws, "fmt", "-check", imports.filename("0"))
     assert fmt.returncode == 0, fmt.stdout

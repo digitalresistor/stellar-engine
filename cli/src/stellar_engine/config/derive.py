@@ -18,14 +18,9 @@ Each function mirrors a Terraform expression and names it, so a change in
 the stage code has one place to follow here.
 """
 
-import re
-
+from stellar_engine import naming
 from stellar_engine import repo as repo_lib
 from stellar_engine.config import models
-
-# `0-bootstrap/main.tf` local.principals keeps values that already carry a
-# principal type, such as `user:admin@example.com`.
-_PRINCIPAL_RE = re.compile(r"^[a-zA-Z]+:")
 
 ORGANIZATION_ADMINS = "gcp-organization-admins"
 DEVOPS = "gcp-devops"
@@ -34,18 +29,14 @@ DEVOPS = "gcp-devops"
 def kms_protection_level(answers: models.Answers) -> str:
     """Returns the CMEK protection level Stage 0 uses.
 
-    Mirrors `local.kms_protection_level` in `0-bootstrap/kms.tf`: an
-    explicit value wins, else SOFTWARE for FEDRAMP_MODERATE and HSM for
-    every other regime.
+    See `naming.kms_protection_level`.
 
     Args:
         answers: The environment answers.
     """
-    if answers.kms_protection_level:
-        return answers.kms_protection_level
-    if answers.compliance.regime == "FEDRAMP_MODERATE":
-        return "SOFTWARE"
-    return "HSM"
+    return naming.kms_protection_level(
+        answers.compliance.regime, answers.kms_protection_level
+    )
 
 
 def compliance_location(answers: models.Answers) -> str:
@@ -68,10 +59,7 @@ def group_name(answers: models.Answers, repo: repo_lib.Repo, key: str) -> str:
     Raises:
         KeyError: If the key is not a field of the Stage 0 `groups` type.
     """
-    defaults = repo.default_groups()
-    if key not in defaults:
-        raise KeyError(key)
-    return answers.groups.get(key) or defaults[key]
+    return naming.group_name(answers.groups, repo.default_groups(), key)
 
 
 def group_principal(
@@ -89,10 +77,9 @@ def group_principal(
     Raises:
         KeyError: If the key is not a field of the Stage 0 `groups` type.
     """
-    name = group_name(answers, repo, key)
-    if _PRINCIPAL_RE.match(name):
-        return name
-    return f"group:{name}@{answers.organization.domain}"
+    return naming.group_principal(
+        group_name(answers, repo, key), answers.organization.domain
+    )
 
 
 def group_email(answers: models.Answers, repo: repo_lib.Repo, key: str) -> str:
@@ -106,7 +93,7 @@ def group_email(answers: models.Answers, repo: repo_lib.Repo, key: str) -> str:
     Raises:
         KeyError: If the key is not a field of the Stage 0 `groups` type.
     """
-    return group_principal(answers, repo, key).split(":", 1)[1]
+    return naming.principal_email(group_principal(answers, repo, key))
 
 
 def env_admin(answers: models.Answers, repo: repo_lib.Repo, env: str) -> str:
@@ -171,7 +158,7 @@ def stage0_project_id(
         answers: The environment answers.
         project: A Stage 0 project from `Repo.stage0_projects`.
     """
-    return f"{answers.prefix}-prod-{project.name}"
+    return naming.stage0_project_id(answers.prefix, project.name)
 
 
 def stage0_projects(
@@ -186,15 +173,10 @@ def stage0_projects(
         answers: The environment answers.
         repo: The engine checkout.
     """
-    return [
-        project
-        for project in repo.stage0_projects()
-        if repo_lib.stage0_project_created(
-            project,
-            no_iam=answers.billing.no_iam,
-            is_org_level=answers.billing.is_org_level,
-        )
-    ]
+    return repo.created_stage0_projects(
+        no_iam=answers.billing.no_iam,
+        is_org_level=answers.billing.is_org_level,
+    )
 
 
 def stage0_project_ids(
@@ -212,19 +194,10 @@ def stage0_project_ids(
     ]
 
 
-def _tenant_env_key(env, tenant):
-    # `local.tenant_envs` in `1-resman/branch-tenants.tf` keys each pair as
-    # "${e}-${t}", and every name built from it goes through lower().
-    return f"{env}-{tenant}".lower()
-
-
 def tenant_project_ids(answers: models.Answers) -> dict[str, list[str]]:
     """Returns the project IDs Stage 1 creates for each tenant.
 
-    Mirrors `tenant-self-iac-projects` and `tenant-self-main-projects` in
-    `1-resman/branch-tenants.tf`: one pair per env, named
-    `<prefix>-<env>-<tenant>-iac-core-0` and `<prefix>-<env>-<tenant>-main-0`
-    with the env and tenant lowercased.
+    See `naming.tenant_project_ids`.
 
     Args:
         answers: The environment answers.
@@ -233,11 +206,9 @@ def tenant_project_ids(answers: models.Answers) -> dict[str, list[str]]:
         Tenant key to project IDs, in env order, iac-core before main.
     """
     return {
-        tenant: [
-            f"{answers.prefix}-{_tenant_env_key(env, tenant)}-{suffix}"
-            for env in answers.resman.envs
-            for suffix in ("iac-core-0", "main-0")
-        ]
+        tenant: naming.tenant_project_ids(
+            answers.prefix, answers.resman.envs, tenant
+        )
         for tenant in answers.resman.tenants
     }
 
@@ -247,10 +218,7 @@ def tenant_service_account_ids(
 ) -> dict[str, list[str]]:
     """Returns the service account IDs Stage 1 creates for each tenant.
 
-    Mirrors `tenant-core-sa` (`tn-<env>-<tenant>-prod-0`) and
-    `tenant-self-iac-sa` (`<env>-<tenant>-iac-0`) in
-    `1-resman/branch-tenants.tf`, both prefixed and lowercased. Service
-    account IDs share the 30-character limit of project IDs.
+    See `naming.tenant_service_account_ids`.
 
     Args:
         answers: The environment answers.
@@ -259,13 +227,8 @@ def tenant_service_account_ids(
         Tenant key to service account IDs, in env order.
     """
     return {
-        tenant: [
-            name
-            for env in answers.resman.envs
-            for name in (
-                f"{answers.prefix}-tn-{_tenant_env_key(env, tenant)}-prod-0",
-                f"{answers.prefix}-{_tenant_env_key(env, tenant)}-iac-0",
-            )
-        ]
+        tenant: naming.tenant_service_account_ids(
+            answers.prefix, answers.resman.envs, tenant
+        )
         for tenant in answers.resman.tenants
     }

@@ -27,6 +27,8 @@ from typing import Any
 import dotenv
 import pydantic
 
+from stellar_engine import patterns
+
 # Maps scripts/config.env keys to PreflightInputs fields.
 CONFIG_ENV_KEYS = {
     "BILLING_ACCOUNT": "billing_account",
@@ -49,9 +51,9 @@ class PreflightInputs(pydantic.BaseModel):
 
     model_config = pydantic.ConfigDict(extra="forbid", frozen=True)
 
-    org_id: str | None = pydantic.Field(default=None, pattern=r"^[0-9]+$")
+    org_id: str | None = pydantic.Field(default=None, pattern=patterns.ORG_ID)
     billing_account: str | None = pydantic.Field(
-        default=None, pattern=r"^[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$"
+        default=None, pattern=patterns.BILLING_ACCOUNT
     )
     billing_no_iam: bool = False
     # False when the billing account belongs to another organization, which
@@ -59,15 +61,15 @@ class PreflightInputs(pydantic.BaseModel):
     # project.
     billing_is_org_level: bool = True
     bootstrap_project: str | None = pydantic.Field(
-        default=None, pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+        default=None, pattern=patterns.PROJECT_ID
     )
     prefix: str | None = None
-    regime: str | None = pydantic.Field(default=None, pattern=r"^[A-Z0-9_]+$")
+    regime: str | None = pydantic.Field(default=None, pattern=patterns.REGIME)
     region: str | None = None
     domain: str | None = None
     customer_id: str | None = None
     bootstrap_user: str | None = pydantic.Field(
-        default=None, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+        default=None, pattern=patterns.EMAIL
     )
     groups: dict[str, str] = pydantic.Field(default_factory=dict)
     redeploy: bool = False
@@ -80,6 +82,45 @@ class PreflightInputs(pydantic.BaseModel):
     # imports, from `existing_org_policies` in answers.yaml. None when the
     # inputs come without answers.yaml, which has nowhere to list them.
     existing_org_policies: tuple[str, ...] | None = None
+
+
+def read_config_env(path):
+    """Reads every value of a `scripts/config.env` file.
+
+    Args:
+        path: Path of the file, in the `KEY=value` format of
+            `scripts/config.env.sample`.
+
+    Returns:
+        A dict of every key in the file to its value without surrounding
+        whitespace, empty for a key without a value.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+    """
+    path = pathlib.Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return {
+        key: (value or "").strip()
+        for key, value in dotenv.dotenv_values(path).items()
+    }
+
+
+def config_env_fields(values):
+    """Maps `scripts/config.env` values to PreflightInputs fields.
+
+    Args:
+        values: Values as `read_config_env` returns them.
+
+    Returns:
+        A dict of PreflightInputs field names to non-empty string values.
+    """
+    return {
+        field: values[key]
+        for key, field in CONFIG_ENV_KEYS.items()
+        if values.get(key)
+    }
 
 
 def load_config_env(path):
@@ -95,15 +136,7 @@ def load_config_env(path):
     Raises:
         FileNotFoundError: If the file does not exist.
     """
-    path = pathlib.Path(path)
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    values = dotenv.dotenv_values(path)
-    found = {
-        field: (values.get(key) or "").strip()
-        for key, field in CONFIG_ENV_KEYS.items()
-    }
-    return {field: value for field, value in found.items() if value}
+    return config_env_fields(read_config_env(path))
 
 
 def resolve(

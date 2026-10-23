@@ -18,21 +18,15 @@ import re
 
 import pytest
 
-import answer_fixtures
 import conftest
+import helpers
+from stellar_engine import paths
 from stellar_engine.config import derive
-from stellar_engine.config import models
-
-
-def _answers(**overrides):
-    return models.Answers.model_validate(
-        answer_fixtures.answer_data(**overrides)
-    )
 
 
 def _with_tenant(tenant="ten1", **info):
     info.setdefault("descriptive_name", "Tenant")
-    return _answers(resman={"tenants": {tenant: info}})
+    return helpers.minimal_answers(resman={"tenants": {tenant: info}})
 
 
 @pytest.mark.parametrize(
@@ -46,12 +40,12 @@ def _with_tenant(tenant="ten1", **info):
     ],
 )
 def test_kms_protection_level_follows_regime(regime, level):
-    answers = _answers(compliance={"regime": regime})
+    answers = helpers.minimal_answers(compliance={"regime": regime})
     assert derive.kms_protection_level(answers) == level
 
 
 def test_explicit_kms_protection_level_wins():
-    answers = _answers(
+    answers = helpers.minimal_answers(
         compliance={"regime": "IL5"}, kms_protection_level="SOFTWARE"
     )
     assert derive.kms_protection_level(answers) == "SOFTWARE"
@@ -67,13 +61,15 @@ def test_kms_rule_matches_stage0(repo):
 
 
 def test_compliance_location_defaults_to_region():
-    assert derive.compliance_location(_answers()) == "us-east4"
-    answers = _answers(compliance={"regime": "IL5", "location": "us"})
+    assert derive.compliance_location(helpers.minimal_answers()) == "us-east4"
+    answers = helpers.minimal_answers(
+        compliance={"regime": "IL5", "location": "us"}
+    )
     assert derive.compliance_location(answers) == "us"
 
 
 def test_group_names_and_principals(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         groups={
             "gcp-devops": "platform-team",
             "gcp-security-admins": "user:sec@example.com",
@@ -100,7 +96,7 @@ def test_group_names_and_principals(repo):
 
 def test_unknown_group_key_raises(repo):
     with pytest.raises(KeyError):
-        derive.group_name(_answers(), repo, "gcp-unknown")
+        derive.group_name(helpers.minimal_answers(), repo, "gcp-unknown")
 
 
 def test_group_principal_rule_matches_stage0(repo):
@@ -110,7 +106,7 @@ def test_group_principal_rule_matches_stage0(repo):
 
 
 def test_env_admin(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         resman={"envs": {"Prod": {"admin": "prod@example.com"}, "Dev": {}}}
     )
     assert derive.env_admin(answers, repo, "Prod") == "prod@example.com"
@@ -131,7 +127,7 @@ def test_tenant_admin(repo):
 
 def test_admin_defaults_match_resman_sample(repo):
     sample = (
-        repo.root / "fast/stages-aw/1-resman/terraform.tfvars.sample"
+        paths.stage_dir(repo.root, paths.RESMAN) / "terraform.tfvars.sample"
     ).read_text(encoding="utf-8")
     assert 'admin = "gcp-organization-admins@<domain>"' in sample
     assert 'admin_principal  = "group:gcp-devops@<domain>"' in sample
@@ -150,7 +146,7 @@ def test_tenant_locations():
 
 
 def test_stage0_project_ids(repo):
-    assert derive.stage0_project_ids(_answers(), repo) == [
+    assert derive.stage0_project_ids(helpers.minimal_answers(), repo) == [
         "tst-prod-iac-core-0",
         "tst-prod-audit-logs-0",
         "tst-prod-billing-exp-0",
@@ -159,7 +155,9 @@ def test_stage0_project_ids(repo):
 
 @pytest.mark.parametrize("billing", [{"no_iam": True}, {"is_org_level": False}])
 def test_stage0_project_ids_skip_billing_export(repo, billing):
-    answers = _answers(billing={"account_id": conftest.BILLING, **billing})
+    answers = helpers.minimal_answers(
+        billing={"account_id": conftest.BILLING, **billing}
+    )
     assert derive.stage0_project_ids(answers, repo) == [
         "tst-prod-iac-core-0",
         "tst-prod-audit-logs-0",
@@ -167,7 +165,7 @@ def test_stage0_project_ids_skip_billing_export(repo, billing):
 
 
 def test_tenant_project_ids_lowercase_env_keys():
-    answers = _answers(
+    answers = helpers.minimal_answers(
         resman={
             "envs": {"Prod": {}, "Int": {}},
             "tenants": {"ten1": {"descriptive_name": "Tenant"}},
@@ -193,7 +191,7 @@ def test_tenant_project_ids_lowercase_env_keys():
 
 def test_tenant_id_formats_match_resman(repo):
     tenants = (
-        repo.root / "fast/stages-aw/1-resman/branch-tenants.tf"
+        paths.stage_dir(repo.root, paths.RESMAN) / "branch-tenants.tf"
     ).read_text(encoding="utf-8")
     for fragment in (
         '"${e}-${t}" => {',
@@ -207,4 +205,4 @@ def test_tenant_id_formats_match_resman(repo):
 
 
 def test_no_tenants_no_ids():
-    assert derive.tenant_project_ids(_answers()) == {}
+    assert derive.tenant_project_ids(helpers.minimal_answers()) == {}

@@ -35,6 +35,7 @@ from rich import table as rich_table
 import typer
 
 import stellar_engine
+from stellar_engine import fsutil
 from stellar_engine import paths
 from stellar_engine import repo as repo_lib
 from stellar_engine import tools as tools_lib
@@ -137,9 +138,14 @@ def main(
     """Validate and guide Stellar Engine deployments."""
 
 
+def _error(message):
+    """Prints an error to stderr without exiting."""
+    typer.secho(f"Error: {message}", fg="red", err=True)
+
+
 def _fail(message, code=_EXIT_USAGE) -> NoReturn:
     """Prints an error to stderr and exits with `code`."""
-    typer.secho(f"Error: {message}", fg="red", err=True)
+    _error(message)
     raise typer.Exit(code)
 
 
@@ -178,28 +184,8 @@ def _session(home_flag, repo_flag):
     return _Session(repository, resolved)
 
 
-def _stale_current_message(home):
-    """Returns why the current environment no longer exists, if it does not.
-
-    `<home>/current` keeps naming an environment after someone deletes its
-    directory by hand.
-    """
-    current = home.current()
-    if current is None or current in home.list_envs():
-        return None
-    return (
-        f"The current environment {current} no longer exists in "
-        f"{home.root}. Run `stellar env list` to see the environments and "
-        "`stellar env use PREFIX` to pick one, or pass --prefix."
-    )
-
-
 def _env(home, prefix):
     """Returns the paths of the selected environment, or exits 2."""
-    if prefix is None:
-        stale = _stale_current_message(home)
-        if stale is not None:
-            _fail(stale)
     try:
         return home.env(home.resolve_prefix(prefix))
     except (paths.NoEnvironmentError, ValueError) as error:
@@ -349,8 +335,8 @@ def init(
         if notes:
             typer.echo(_bullets("Review these carried answers:", notes))
     for stage in paths.STAGES:
-        for line in imports_lib.warnings(answers, stage):
-            typer.secho(line, fg="yellow", err=True)
+        for line in imports_lib.warnings(answers, stage, session.repo):
+            _warn(line)
     typer.echo(f"Saved {env.answers}.")
     typer.echo(f"Current environment: {env.prefix}.")
     typer.echo("Next: stellar render")
@@ -387,7 +373,7 @@ def _init_base(home_obj, prefix, answers_from, from_config_env, new_prefix):
     seeded = bool(answers_from or from_config_env or new_prefix)
     target = prefix or (None if seeded else home_obj.current())
     if target and not prefix:
-        stale = _stale_current_message(home_obj)
+        stale = home_obj.stale_current_message()
         if stale is not None:
             _warn(f"{stale} init now creates {target} from scratch.")
     if target:
@@ -478,7 +464,7 @@ def _save_answers(session, data, base, origin=None):
         answers_lib.save(
             env.answers,
             answers,
-            schema_path=home_obj.schema_path,
+            home=home_obj.root,
             previous=base.previous,
         )
     except answers_lib.AnswersError as error:
@@ -540,7 +526,7 @@ def env_list(home: HomeOption = None, repo: RepoOption = None):
         )
     rich_console.Console().print(table)
     typer.echo(f"Home: {home_obj.root}")
-    stale = _stale_current_message(home_obj)
+    stale = home_obj.stale_current_message()
     if stale is not None:
         _warn(stale)
 
@@ -660,7 +646,7 @@ def imports_scan(
             answers_lib.save(
                 env.answers,
                 updated,
-                schema_path=session.home.schema_path,
+                home=session.home.root,
                 previous=answers_lib.load_data(env.answers),
             )
         except answers_lib.AnswersError as error:
@@ -670,13 +656,6 @@ def imports_scan(
             f"existing_org_policies in {env.answers}."
         )
     typer.echo("Next: stellar render")
-
-
-def _read_text(path):
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
 
 
 def _confirm_replace(target):
@@ -692,22 +671,11 @@ def _confirm_replace(target):
 
 def _write_imports(workspace, stage, answers):
     """Writes the import file and returns its path and what happened."""
-    target = workspace / imports_lib.filename(stage)
-    before = _read_text(target)
     try:
-        written = imports_lib.write(workspace, stage, answers)
+        outcome = imports_lib.write(workspace, stage, answers)
     except imports_lib.ImportBlockError as error:
         _fail(str(error))
-    after = _read_text(target)
-    if written is None:
-        outcome = "removed" if before is not None and after is None else None
-    elif before is None:
-        outcome = writer.Outcome.CREATED.value
-    elif before == after:
-        outcome = writer.Outcome.UNCHANGED.value
-    else:
-        outcome = writer.Outcome.UPDATED.value
-    return target, outcome
+    return workspace / imports_lib.filename(stage), outcome
 
 
 def _render_text(stage, answers, session, env, local_tools):
@@ -730,7 +698,7 @@ def _print_next_steps(stage, workspace, answers, reports):
         return
     typer.echo(f"Next steps for {stage}:")
     typer.echo(f"  {chdir} init")
-    if stage == paths.STAGES[0]:
+    if stage == paths.BOOTSTRAP:
         user = answers.bootstrap_user or _BOOTSTRAP_USER_PLACEHOLDER
         typer.echo(f"  {chdir} plan -var bootstrap_user={shlex.quote(user)}")
     else:
@@ -787,14 +755,14 @@ def _render_stage(name, answers, session, env, local_tools, options):
             now=options.now,
         )
     except writer.OverwriteRefusedError as error:
-        typer.secho(f"Error: {error}", fg="red", err=True)
+        _error(error)
         ok = False
         rows = [(name, target, "refused", None)]
     else:
         rows = [(name, target, result.outcome.value, result.backup)]
     imports_target, imports_outcome = _write_imports(sync.path, name, answers)
     if imports_outcome is not None:
-        rows.append((name, imports_target, imports_outcome, None))
+        rows.append((name, imports_target, imports_outcome.value, None))
     return sync, rows, ok
 
 
@@ -844,8 +812,8 @@ def render(
             f"this render uses {session.repo.root}."
         )
     for name in selected:
-        for line in imports_lib.warnings(answers, name):
-            typer.secho(line, fg="yellow", err=True)
+        for line in imports_lib.warnings(answers, name, session.repo):
+            _warn(line)
     local_tools = tools_lib.SystemTools()
     if show_diff:
         _render_diff(selected, answers, session, env, local_tools)
@@ -893,7 +861,7 @@ def _render_diff(selected, answers, session, env, local_tools):
             (workspace / _TFVARS, text),
             (imports_target, imports_text),
         ):
-            if not content and _read_text(target) is None:
+            if not content and fsutil.read_text_or_none(target) is None:
                 continue
             changes = writer.diff(target, content)
             if changes:
@@ -1070,8 +1038,7 @@ def preflight(
         )
         inputs_lib.validate_against_repo(resolved, session.repo)
     except (pydantic.ValidationError, repo_lib.RepoError, ValueError) as error:
-        err_console.print(f"[bold red]Error:[/] {error}")
-        raise typer.Exit(_EXIT_USAGE) from error
+        _fail(str(error))
     ctx = checks.Context(
         inputs=resolved,
         cloud=live.LiveCloudApi(),
