@@ -76,6 +76,10 @@ class PreflightInputs(pydantic.BaseModel):
     # Project IDs that import blocks adopt instead of creating, so preflight
     # expects them to exist.
     imported_project_ids: tuple[str, ...] = ()
+    # Constraints of the existing organization policies that Stage 0
+    # imports, from `existing_org_policies` in answers.yaml. None when the
+    # inputs come without answers.yaml, which has nowhere to list them.
+    existing_org_policies: tuple[str, ...] | None = None
 
 
 def load_config_env(path):

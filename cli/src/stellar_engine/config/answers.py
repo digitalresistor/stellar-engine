@@ -510,8 +510,9 @@ def to_preflight(answers: models.Answers) -> dict:
         answers: Validated answers.
 
     Returns:
-        Field values without unset ones, including the tenant project IDs
-        and the project IDs that import blocks adopt.
+        Field values without unset ones, including the tenant project IDs,
+        the project IDs that import blocks adopt, and the organization
+        policies that Stage 0 imports.
     """
     tenant_ids = [
         project_id
@@ -541,5 +542,6 @@ def to_preflight(answers: models.Answers) -> dict:
         "groups": dict(answers.groups),
         "tenant_project_ids": tuple(tenant_ids),
         "imported_project_ids": tuple(imported),
+        "existing_org_policies": tuple(answers.existing_org_policies),
     }
     return {key: value for key, value in values.items() if value is not None}

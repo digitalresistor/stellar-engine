@@ -242,3 +242,52 @@ def test_problems_include_override_problems(repo):
     problems = validate.problems(answers, repo)
     assert len(problems) == 3
     assert all(problem.startswith("overrides.") for problem in problems)
+
+
+def test_existing_org_policies_declared_by_stage0(repo):
+    answers = _answers(
+        existing_org_policies=[
+            "iam.allowedPolicyMemberDomains",
+            "compute.skipDefaultNetworkCreation",
+        ]
+    )
+    assert validate.problems(answers, repo) == []
+
+
+def test_existing_org_policies_reject_custom_and_undeclared(repo):
+    answers = _answers(
+        existing_org_policies=["custom.kmsRotation", "unmanaged.constraint"]
+    )
+    problems = validate.problems(answers, repo)
+    assert len(problems) == 2
+    assert "custom.kmsRotation" in problems[0]
+    assert "custom constraints" in problems[0]
+    assert "unmanaged.constraint" in problems[1]
+    assert "stellar imports scan" in problems[1]
+
+
+def test_existing_org_policies_conflict_with_import_defaults(repo):
+    overrides = {
+        "0-bootstrap": {"org_policies_config": {"import_defaults": True}}
+    }
+    assert validate.problems(_answers(overrides=overrides), repo) == []
+    answers = _answers(
+        overrides=overrides,
+        existing_org_policies=["iam.allowedPolicyMemberDomains"],
+    )
+    problems = validate.problems(answers, repo)
+    assert len(problems) == 1
+    assert "import_defaults" in problems[0]
+    assert "whether or not each one exists" in problems[0]
+
+
+def test_existing_org_policies_accept_any_regime(repo):
+    # The list stays valid when the regime omits a templated policy,
+    # because the import filter drops it.
+    answers = _answers(
+        existing_org_policies=[
+            "compute.managed.restrictProtocolForwardingCreationForTypes"
+        ]
+    )
+    answers.compliance.regime = "FEDRAMP_MODERATE"
+    assert validate.problems(answers, repo) == []

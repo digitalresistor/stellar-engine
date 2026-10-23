@@ -1258,6 +1258,7 @@ def check_shared_org(ctx):
                 doc=DDG_PREREQUISITES,
             )
         )
+    results.append(_org_policy_result(ctx, org_id))
     try:
         bindings = ctx.cloud.org_iam_bindings(org_id)
     except api.CloudError as error:
@@ -1293,6 +1294,86 @@ def check_shared_org(ctx):
         )
     )
     return results
+
+
+def _policies(names):
+    noun = "policy" if len(names) == 1 else "policies"
+    return f"{len(names)} existing organization {noun}"
+
+
+def _org_policy_result(ctx, org_id):
+    """Checks that answers.yaml lists the policies Stage 0 must import.
+
+    The final Stage 0 apply creates every policy that it declares, and
+    creating a policy that already exists fails, so each existing one needs
+    an import block. Without answers.yaml, or on a redeploy, the check
+    only counts the existing policies.
+    """
+    check_id = "shared.org_policies"
+    title = "Existing organization policies"
+    try:
+        existing = ctx.cloud.list_org_policies(org_id)
+    except api.CloudError as error:
+        return CheckResult(
+            check_id,
+            Category.SHARED_ORG,
+            title,
+            Status.WARN,
+            f"Cannot list the organization policies: {error}",
+        )
+    kept = ctx.repo.scan_org_policies(existing, ctx.inputs.regime).kept
+    if not kept:
+        return CheckResult(
+            check_id,
+            Category.SHARED_ORG,
+            title,
+            Status.PASS,
+            "No organization policy that Stage 0 declares exists yet.",
+        )
+    listed = ctx.inputs.existing_org_policies
+    if listed is None or ctx.inputs.redeploy:
+        # Without answers.yaml there is no list to compare, and after a
+        # Stage 0 apply its state already holds the policies it created,
+        # so only report the count.
+        return CheckResult(
+            check_id,
+            Category.SHARED_ORG,
+            title,
+            Status.PASS,
+            f"Stage 0 declares {_policies(kept)}. "
+            + (
+                "This is a redeploy, so Stage 0 state already holds the "
+                "policies it created."
+                if ctx.inputs.redeploy
+                else "Run `stellar imports scan` after `stellar init` so "
+                "the final Stage 0 apply imports them."
+            ),
+        )
+    missing = sorted(set(kept) - set(listed))
+    if not missing:
+        return CheckResult(
+            check_id,
+            Category.SHARED_ORG,
+            title,
+            Status.PASS,
+            f"Stage 0 declares {_policies(kept)}, and "
+            "existing_org_policies lists every one for import.",
+        )
+    return CheckResult(
+        check_id,
+        Category.SHARED_ORG,
+        title,
+        Status.WARN,
+        f"Stage 0 declares {_policies(kept)}, and existing_org_policies "
+        f"does not list {len(missing)} of them for import: "
+        f"{_listed(missing)}.",
+        remedy=(
+            "Run `stellar imports scan`, then `stellar render`, so the final "
+            "Stage 0 apply imports these policies instead of failing to "
+            "create them."
+        ),
+        doc=DDG_STAGE0,
+    )
 
 
 def check_manual(ctx):

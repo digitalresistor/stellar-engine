@@ -219,6 +219,15 @@ class CloudApi(Protocol):
         """Returns whether an organization custom constraint exists."""
         ...
 
+    def list_org_policies(self, org_id: str) -> list[str]:
+        """Returns the constraints of the policies set on an organization.
+
+        Returns:
+            Constraint names without the resource path, such as
+            `iam.allowedPolicyMemberDomains`, sorted.
+        """
+        ...
+
     def log_sink_exists(self, org_id: str, name: str) -> bool:
         """Returns whether an organization log sink exists."""
         ...

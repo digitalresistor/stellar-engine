@@ -64,6 +64,16 @@ def test_review_notes_same_regime_only_lists_dropped_keys():
     assert seed.review_notes(_source(), "IL5") == notes
 
 
+def test_seed_drops_existing_org_policies():
+    source = _source(existing_org_policies=["iam.allowedPolicyMemberDomains"])
+    assert "existing_org_policies" not in seed.seed(source)
+    notes = seed.review_notes(source, None)
+    assert any(
+        "drops existing_org_policies" in note and "stellar imports scan" in note
+        for note in notes
+    )
+
+
 def test_review_notes_on_regime_change():
     source = _source(
         kms_protection_level="HSM",

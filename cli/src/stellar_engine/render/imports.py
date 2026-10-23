@@ -20,6 +20,9 @@ projects instead of creating them, so the answers list each resource
 address with its import ID and the renderer turns them into a
 `<stage>-imports.tf` file in the workspace. The file is a real file owned
 by the environment; `workspace.sync` never links or removes it.
+
+Stage 0 also adopts the organization policies that `stellar imports scan`
+records in `existing_org_policies`, replacing `0-bootstrap/import.sh`.
 """
 
 from collections.abc import Mapping, Sequence
@@ -42,6 +45,18 @@ _FILE_MODE = 0o644
 # `count = 0` unless `local.billing_mode` is "org", which needs `no_iam`
 # false and `is_org_level` true.
 _BILLING_EXPORT_MODULE = "module.billing-export-project[0]."
+_BOOTSTRAP_STAGE = paths.STAGES[0]
+# The stage locals that the import file adds; the prefix keeps them apart
+# from the locals of the stage code.
+_POLICIES_LOCAL = "stellar_existing_org_policies"
+_IMPORTS_LOCAL = "stellar_org_policy_imports"
+_ORG_POLICY_COMMENT = (
+    "# stellar imports scan found these organization policies, which Stage 0",
+    "# declares. The first apply passes bootstrap_user, so Stage 0 manages no",
+    "# organization policies yet and nothing is imported. The final apply",
+    "# adopts the policies that already exist instead of failing to create",
+    "# them. The filter drops constraints that the regime templates omit.",
+)
 
 
 class ImportBlockError(Exception):
@@ -116,36 +131,85 @@ def validate(answers: models.Answers, stage: str) -> list[str]:
     return problems(answers, stage) + warnings(answers, stage)
 
 
-def header(stage: str, prefix: str) -> list[str]:
+def header(stage: str, prefix: str, *, org_policies: bool = False) -> list[str]:
     """Returns the generated header of a stage's import file.
 
     Args:
         stage: Stage name or alias.
         prefix: Environment prefix.
+        org_policies: Whether the file also imports `existing_org_policies`.
     """
     stage = paths.resolve_stage(stage)
+    sources = f"imports.{stage}"
+    if org_policies:
+        sources += " and existing_org_policies"
     return [
-        f"{_MARKER}{prefix}/answers.yaml imports.{stage}.",
+        f"{_MARKER}{prefix}/answers.yaml {sources}.",
         "# Edit answers.yaml and rerun stellar render; the next render "
         "replaces manual edits.",
     ]
 
 
-def dumps(imports: Mapping[str, str], header: Sequence[str]) -> str:
+def _org_policy_blocks(names: Sequence[str]) -> list[str]:
+    """Returns the locals and the `import` block of the organization policies.
+
+    The import block mirrors the `import_defaults` block in
+    `0-bootstrap/organization.tf`, which targets the same resources.
+    """
+    listed = [f"    {hcl.quote(name)}," for name in sorted(set(names))]
+    locals_block = "\n".join(
+        [
+            *_ORG_POLICY_COMMENT,
+            "locals {",
+            f"  {_POLICIES_LOCAL} = [",
+            *listed,
+            "  ]",
+            f"  {_IMPORTS_LOCAL} = toset([",
+            f"    for name in local.{_POLICIES_LOCAL} :",
+            "    name if contains(keys(local.org_policies), name)",
+            "  ])",
+            "}",
+        ]
+    )
+    import_block = "\n".join(
+        [
+            "import {",
+            "  for_each = (",
+            "    var.bootstrap_user == null",
+            f"    ? local.{_IMPORTS_LOCAL}",
+            "    : toset([])",
+            "  )",
+            '  id = "organizations/${var.organization.id}/policies/'
+            '${each.key}"',
+            "  to = module.organization.google_org_policy_policy.default"
+            "[each.key]",
+            "}",
+        ]
+    )
+    return [locals_block, import_block]
+
+
+def dumps(
+    imports: Mapping[str, str],
+    header: Sequence[str],
+    org_policies: Sequence[str] = (),
+) -> str:
     """Renders one `import` block per entry, sorted by address.
 
     Args:
         imports: Resource address mapped to import ID.
         header: Comment lines emitted at the top of the file.
+        org_policies: Constraints of existing organization policies that
+            Stage 0 imports on its final apply, only for `0-bootstrap`.
 
     Returns:
         The HCL text in `terraform fmt` canonical form, empty when there
-        are no imports.
+        are no imports and no organization policies.
 
     Raises:
         ImportBlockError: If an address is not a resource address.
     """
-    if not imports:
+    if not imports and not org_policies:
         return ""
     found = [
         problem
@@ -167,7 +231,33 @@ def dumps(imports: Mapping[str, str], header: Sequence[str]) -> str:
         )
         for address in sorted(imports)
     )
+    if org_policies:
+        blocks.extend(_org_policy_blocks(org_policies))
     return "\n\n".join(blocks) + "\n"
+
+
+def text(answers: models.Answers, stage: str) -> str:
+    """Returns the import file of a stage for the answers.
+
+    Args:
+        answers: The environment answers.
+        stage: Stage name or alias.
+
+    Returns:
+        The file text, empty when the stage imports nothing.
+
+    Raises:
+        ImportBlockError: If an address is not a resource address.
+    """
+    stage = paths.resolve_stage(stage)
+    policies = (
+        answers.existing_org_policies if stage == _BOOTSTRAP_STAGE else []
+    )
+    return dumps(
+        answers.imports.get(stage, {}),
+        header(stage, answers.prefix, org_policies=bool(policies)),
+        policies,
+    )
 
 
 def _is_generated(path: pathlib.Path) -> bool:
@@ -195,9 +285,9 @@ def write(
     """Writes or removes the import file of a stage in its workspace.
 
     Every render replaces the file, so it always matches the answers.
-    When the stage has no imports, a previously generated file is removed,
-    because a stale import block would adopt a resource the answers no
-    longer name.
+    When the stage has no imports and no organization policies to adopt, a
+    previously generated file is removed, because a stale import block
+    would adopt a resource the answers no longer name.
 
     Args:
         workspace: The stage workspace directory.
@@ -205,7 +295,7 @@ def write(
         answers: The environment answers.
 
     Returns:
-        The written file, or None when the stage has no imports.
+        The written file, or None when the stage imports nothing.
 
     Raises:
         ImportBlockError: If an address is invalid, or a file of the same
@@ -213,9 +303,9 @@ def write(
     """
     stage = paths.resolve_stage(stage)
     target = workspace / filename(stage)
-    entries = answers.imports.get(stage, {})
+    content = text(answers, stage)
     exists = target.exists() or target.is_symlink()
-    if not entries:
+    if not content:
         if exists and _is_generated(target):
             target.unlink()
         return None
@@ -224,5 +314,5 @@ def write(
             f"stellar did not write {target}; move it away or delete it, "
             "then rerun stellar render."
         )
-    _write_atomic(target, dumps(entries, header(stage, answers.prefix)))
+    _write_atomic(target, content)
     return target

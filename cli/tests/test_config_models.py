@@ -177,3 +177,40 @@ def test_import_ids_must_not_be_empty():
     data = answer_fixtures.answer_data(imports={"0-bootstrap": {"x.y": ""}})
     with pytest.raises(pydantic.ValidationError):
         models.Answers.model_validate(data)
+
+
+def test_existing_org_policies_are_sorted_and_unique():
+    data = answer_fixtures.answer_data(
+        existing_org_policies=[
+            "storage.uniformBucketLevelAccess",
+            "iam.allowedPolicyMemberDomains",
+            "storage.uniformBucketLevelAccess",
+        ]
+    )
+    answers = models.Answers.model_validate(data)
+    assert answers.existing_org_policies == [
+        "iam.allowedPolicyMemberDomains",
+        "storage.uniformBucketLevelAccess",
+    ]
+    assert (
+        models.Answers.model_validate(
+            answer_fixtures.answer_data()
+        ).existing_org_policies
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "noDot",
+        "organizations/1/policies/iam.x",
+        'iam.x"]',
+        "iam.x ${y}",
+        "",
+    ],
+)
+def test_existing_org_policies_reject_non_constraints(name):
+    data = answer_fixtures.answer_data(existing_org_policies=[name])
+    with pytest.raises(pydantic.ValidationError):
+        models.Answers.model_validate(data)

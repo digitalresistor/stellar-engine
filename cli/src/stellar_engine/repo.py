@@ -52,6 +52,27 @@ _HOLDER_KEY_RE = re.compile(
     r"|(?P<domain>domain):\$\{var\.organization\.domain\})$"
 )
 _VERSION_FLOOR_RE = re.compile(r">=\s*([0-9.]+)")
+# `local._org_policies_raw` in `0-bootstrap/organization.tf` decodes every
+# `*_policy.yaml` file of the plain directory with `yamldecode`, and renders
+# the files of the templated directory with `templatefile` first.
+_ORG_POLICY_DIR = "data/org-policies"
+_TEMPLATED_ORG_POLICY_DIR = "data/custom-org-policies"
+_ORG_POLICY_GLOB = "*_policy.yaml"
+# A top-level key of a templated policy file. Template directives such as
+# `%{ if ... ~}` and indented rules never match.
+_TEMPLATED_KEY_RE = re.compile(r"^([A-Za-z0-9_.]+):")
+# A template directive on its own line, such as `%{ if ... ~}`.
+_DIRECTIVE_RE = re.compile(
+    r"^\s*%\{~?\s*(?P<keyword>if|else|endif|for|endfor)\b(?P<rest>.*?)~?\}"
+)
+# The regime condition of the templated policy files, such as
+# `!contains(["FEDRAMP_MODERATE"], regime)`.
+_REGIME_CONDITION_RE = re.compile(
+    r"^\s*(?P<negated>!?)\s*contains\(\s*\[(?P<regimes>[^\]]*)\]\s*,"
+    r"\s*regime\s*\)\s*$"
+)
+# Constraints that `data/custom-constraint-policies` defines.
+CUSTOM_CONSTRAINT_PREFIX = "custom."
 # Stage 0 writes `local.tfvars` to `0-bootstrap.auto.tfvars.json` and
 # `local.tfvars_globals` to `0-globals.auto.tfvars.json` in
 # `outputs-files.tf`; `fast/stage-links.sh` links both into Stage 1. Stage 0
@@ -116,6 +137,66 @@ def stage0_project_created(
     if project.module == BILLING_EXPORT_MODULE:
         return billing_export_created(no_iam=no_iam, is_org_level=is_org_level)
     return True
+
+
+@dataclasses.dataclass(frozen=True)
+class OrgPolicyScan:
+    """Organization policies sorted by whether Stage 0 imports them.
+
+    Attributes:
+        kept: Policies that Stage 0 declares and imports on its final
+            apply.
+        custom: Policies of custom constraints, which Stage 0 never
+            imports.
+        undeclared: Policies that Stage 0 does not manage.
+    """
+
+    kept: tuple[str, ...]
+    custom: tuple[str, ...]
+    undeclared: tuple[str, ...]
+
+
+def _templated_keys(text, regime):
+    """Returns the top-level keys of a templated policy file for a regime.
+
+    Args:
+        text: Content of a `data/custom-org-policies` file.
+        regime: Regime that `templatefile` renders the file for, or None to
+            keep the keys of every regime.
+
+    Returns:
+        The set of top-level keys that the rendered file contains.
+    """
+    keys = set()
+    # One entry per open directive: True or False when the regime decides
+    # the branch, None when it does not.
+    stack = []
+    for line in text.splitlines():
+        directive = _DIRECTIVE_RE.match(line)
+        if directive is None:
+            key = _TEMPLATED_KEY_RE.match(line)
+            if key and False not in stack:
+                keys.add(key.group(1))
+            continue
+        keyword = directive.group("keyword")
+        if keyword == "if":
+            stack.append(_regime_branch(directive.group("rest"), regime))
+        elif keyword == "for":
+            stack.append(None)
+        elif keyword == "else" and stack and stack[-1] is not None:
+            stack[-1] = not stack[-1]
+        elif keyword in ("endif", "endfor") and stack:
+            stack.pop()
+    return keys
+
+
+def _regime_branch(condition, regime):
+    """Returns whether a template condition holds for a regime, or None."""
+    match = _REGIME_CONDITION_RE.match(condition)
+    if regime is None or match is None:
+        return None
+    regimes = set(re.findall(r'"([^"]*)"', match.group("regimes")))
+    return (regime in regimes) != bool(match.group("negated"))
 
 
 def _counted(body):
@@ -320,6 +401,76 @@ class Repo:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             names.extend(data)
         return names
+
+    def declared_org_policies(self, regime=None):
+        """Returns the constraints of the organization policies Stage 0 sets.
+
+        The names are the top-level keys of the `*_policy.yaml` files in
+        `data/org-policies` and `data/custom-org-policies`, the files that
+        `local._org_policies_raw` in `organization.tf` loads. A templated
+        file can omit a key for some regimes through a
+        `contains([...], regime)` condition, so pass the regime to drop
+        those keys the way `templatefile` does. A key behind any other
+        condition counts for every regime.
+
+        Args:
+            regime: Assured Workloads regime, such as `FEDRAMP_MODERATE`.
+                None returns the keys of every regime.
+
+        Returns:
+            Sorted unique constraint names, such as
+            `iam.allowedPolicyMemberDomains`.
+        """
+        names = set()
+        for path in sorted(
+            (self.bootstrap_dir / _ORG_POLICY_DIR).glob(_ORG_POLICY_GLOB)
+        ):
+            names.update(yaml.safe_load(path.read_text(encoding="utf-8")) or {})
+        for path in sorted(
+            (self.bootstrap_dir / _TEMPLATED_ORG_POLICY_DIR).glob(
+                _ORG_POLICY_GLOB
+            )
+        ):
+            names.update(
+                _templated_keys(path.read_text(encoding="utf-8"), regime)
+            )
+        return sorted(names)
+
+    def scan_org_policies(self, existing, regime=None):
+        """Sorts existing organization policies by whether Stage 0 imports them.
+
+        These are the rules of `0-bootstrap/import.sh`. Stage 0 imports
+        each existing policy that it declares, so its final apply adopts
+        the policy instead of failing to create it. A policy of a custom
+        constraint that Stage 0 declares is skipped, because Stage 0
+        creates that constraint in the same apply, and preflight reports a
+        custom constraint that already exists. Any other policy, custom or
+        not, is undeclared.
+
+        Args:
+            existing: Constraint names of the policies set on the
+                organization.
+            regime: Assured Workloads regime whose templated policies
+                count as declared. None counts the policies of every
+                regime.
+
+        Returns:
+            An `OrgPolicyScan` with sorted unique names.
+        """
+        declared = set(self.declared_org_policies(regime))
+        kept, custom, undeclared = set(), set(), set()
+        for name in existing:
+            if name not in declared:
+                undeclared.add(name)
+            elif name.startswith(CUSTOM_CONSTRAINT_PREFIX):
+                custom.add(name)
+            else:
+                kept.add(name)
+        return OrgPolicyScan(
+            tuple(sorted(kept)),
+            tuple(sorted(custom)),
+            tuple(sorted(undeclared)),
+        )
 
     def _module_names(self, filename):
         """Maps each module in a Stage 0 file to its `name` argument."""

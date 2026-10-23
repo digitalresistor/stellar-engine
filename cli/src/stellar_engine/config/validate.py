@@ -116,6 +116,7 @@ def problems(answers: models.Answers, repo: repo_lib.Repo) -> list[str]:
                 for problem in import_address_problems(address)
             )
     found.extend(_stage0_import_id_problems(answers, repo))
+    found.extend(_org_policy_problems(answers, repo))
     found.extend(stages.override_problems(answers, repo))
     return found
 
@@ -140,6 +141,44 @@ def _stage0_import_id_problems(answers, repo):
                 f"from prefix {answers.prefix}, so Terraform would replace "
                 f"the imported project; set the import ID to {expected}."
             )
+    return found
+
+
+def _org_policy_problems(answers, repo):
+    """Checks `existing_org_policies` against the Stage 0 policy files."""
+    names = answers.existing_org_policies
+    if not names:
+        return []
+    # Every regime counts here, so a regime change does not invalidate
+    # the list; the import filter drops policies the regime omits, and
+    # preflight compares the list with the regime's own policies.
+    scan = repo.scan_org_policies(names)
+    found = []
+    if scan.custom:
+        found.append(
+            f"existing_org_policies lists {', '.join(scan.custom)}, which "
+            "use custom constraints that Stage 0 creates in the same apply, "
+            "so Stage 0 never imports them; remove them."
+        )
+    if scan.undeclared:
+        found.append(
+            f"existing_org_policies lists {', '.join(scan.undeclared)}, "
+            "which Stage 0 does not declare in data/org-policies or "
+            "data/custom-org-policies; remove them or rerun stellar imports "
+            "scan."
+        )
+    config = answers.overrides.get(_BOOTSTRAP_STAGE, {}).get(
+        "org_policies_config"
+    )
+    if isinstance(config, dict) and config.get("import_defaults") is True:
+        found.append(
+            f"overrides.{_BOOTSTRAP_STAGE}.org_policies_config."
+            "import_defaults is true while existing_org_policies is set; "
+            "import_defaults imports a fixed list of policies whether or "
+            "not each one exists, so a missing policy fails the import, "
+            "while the scan lists exactly the declared policies that "
+            "exist; remove import_defaults."
+        )
     return found
 
 

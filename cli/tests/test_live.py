@@ -253,3 +253,43 @@ def test_list_billing_accounts_translates_errors(monkeypatch):
     monkeypatch.setitem(cloud.__dict__, "_billing", Billing())
     with pytest.raises(api.AccessDeniedError, match="no billing access"):
         cloud.list_billing_accounts()
+
+
+class _Policy:
+    def __init__(self, name):
+        self.name = name
+
+
+def test_list_org_policies(monkeypatch):
+    parents = []
+
+    class OrgPolicy:
+        def list_policies(self, parent):
+            parents.append(parent)
+            return [
+                _Policy("organizations/123/policies/storage.publicAccess"),
+                _Policy("organizations/123/policies/custom.kmsRotation"),
+                _Policy(
+                    "organizations/123/policies/iam.allowedPolicyMemberDomains"
+                ),
+            ]
+
+    cloud = live.LiveCloudApi()
+    monkeypatch.setitem(cloud.__dict__, "_org_policy", OrgPolicy())
+    assert cloud.list_org_policies("123") == [
+        "custom.kmsRotation",
+        "iam.allowedPolicyMemberDomains",
+        "storage.publicAccess",
+    ]
+    assert parents == ["organizations/123"]
+
+
+def test_list_org_policies_translates_errors(monkeypatch):
+    class OrgPolicy:
+        def list_policies(self, parent):
+            raise _service_disabled()
+
+    cloud = live.LiveCloudApi()
+    monkeypatch.setitem(cloud.__dict__, "_org_policy", OrgPolicy())
+    with pytest.raises(api.ApiDisabledError):
+        cloud.list_org_policies("123")

@@ -15,8 +15,9 @@
 """Command line entry point for the `stellar` command.
 
 Every command uses the same exit codes: 0 on success, 1 when preflight
-checks fail, 2 on usage or validation errors, and 3 when `render` refuses
-to overwrite a manually edited file.
+checks fail or `imports scan` cannot read Google Cloud, 2 on usage or
+validation errors, and 3 when `render` refuses to overwrite a manually
+edited file.
 """
 
 import dataclasses
@@ -40,8 +41,10 @@ from stellar_engine import tools as tools_lib
 from stellar_engine import workspace as workspace_lib
 from stellar_engine.config import answers as answers_lib
 from stellar_engine.config import derive
+from stellar_engine.config import models
 from stellar_engine.config import seed as seed_lib
 from stellar_engine.config import validate as validate_lib
+from stellar_engine.gcp import api
 from stellar_engine.gcp import live
 from stellar_engine.preflight import checks
 from stellar_engine.preflight import inputs as inputs_lib
@@ -64,7 +67,13 @@ env_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(env_app, name="env")
+imports_app = typer.Typer(
+    help="Find resources that exist before Stage 0, so Stage 0 imports them.",
+    no_args_is_help=True,
+)
+app.add_typer(imports_app, name="imports")
 
+_EXIT_CLOUD = 1
 _EXIT_USAGE = 2
 _EXIT_OVERWRITE_REFUSED = 3
 
@@ -197,8 +206,15 @@ def _env(home, prefix):
         _fail(str(error))
 
 
-def _load_answers(env, repository):
-    """Loads and validates an environment's answers, or exits 2."""
+def _load_answers(env, repository, *, check_repo=True):
+    """Loads and validates an environment's answers, or exits 2.
+
+    Args:
+        env: The environment paths.
+        repository: The engine checkout.
+        check_repo: Whether to also apply the repository rules of
+            `validate.problems`.
+    """
     if not env.answers.is_file():
         _fail(
             f"No answers for {env.prefix} at {env.answers}. Run `stellar "
@@ -215,9 +231,10 @@ def _load_answers(env, repository):
             f"run `stellar init --answers-from {env.prefix} --prefix "
             f"{answers.prefix}` to copy it into a new environment."
         )
-    found = validate_lib.problems(answers, repository)
-    if found:
-        _fail(_bullets(f"{env.answers} has problems:", found))
+    if check_repo:
+        found = validate_lib.problems(answers, repository)
+        if found:
+            _fail(_bullets(f"{env.answers} has problems:", found))
     return answers
 
 
@@ -582,6 +599,77 @@ def env_show(
         typer.echo(f"Imports for {stage}:")
         for address, import_id in sorted(entries.items()):
             typer.echo(f"  {address} = {import_id}")
+    if answers.existing_org_policies:
+        typer.echo("Existing organization policies that Stage 0 imports:")
+        for name in answers.existing_org_policies:
+            typer.echo(f"  {name}")
+
+
+_SCAN_RESULTS = {
+    "kept": "import on the final Stage 0 apply",
+    "custom": "skip, Stage 0 creates the custom constraint",
+    "undeclared": "skip, Stage 0 does not set it for this regime",
+}
+
+
+@imports_app.command("scan")
+def imports_scan(
+    prefix: PrefixOption = None,
+    home: HomeOption = None,
+    repo: RepoOption = None,
+):
+    """Record the existing organization policies that Stage 0 imports.
+
+    The command lists the policies on the organization, keeps those that
+    Stage 0 declares, and saves them to existing_org_policies in
+    answers.yaml, so stellar render writes their import block. It only
+    reads from Google Cloud.
+    """
+    session = _session(home, repo)
+    env = _env(session.home, prefix)
+    # The scan replaces existing_org_policies, so a stale list must not
+    # stop it; the updated answers are validated before the save.
+    answers = _load_answers(env, session.repo, check_repo=False)
+    org_id = answers.organization.id
+    try:
+        existing = live.LiveCloudApi().list_org_policies(org_id)
+    except (api.CloudError, api.CredentialsError) as error:
+        _fail(
+            f"Cannot list the policies of organization {org_id}: {error}",
+            _EXIT_CLOUD,
+        )
+    scan = session.repo.scan_org_policies(existing, answers.compliance.regime)
+    if existing:
+        table = rich_table.Table("Constraint", "Result")
+        for field, result in _SCAN_RESULTS.items():
+            for name in getattr(scan, field):
+                table.add_row(name, result)
+        rich_console.Console().print(table)
+    else:
+        typer.echo(f"Organization {org_id} has no organization policies.")
+    data = answers.model_dump(mode="json", exclude_none=True)
+    data["existing_org_policies"] = list(scan.kept)
+    updated = models.Answers.model_validate(data)
+    found = validate_lib.problems(updated, session.repo)
+    if found:
+        _fail(_bullets("The answers have problems:", found))
+    if updated.existing_org_policies == answers.existing_org_policies:
+        typer.echo(f"{env.answers} already lists these policies.")
+    else:
+        try:
+            answers_lib.save(
+                env.answers,
+                updated,
+                schema_path=session.home.schema_path,
+                previous=answers_lib.load_data(env.answers),
+            )
+        except answers_lib.AnswersError as error:
+            _fail(str(error))
+        typer.echo(
+            f"Saved {len(scan.kept)} organization policies to "
+            f"existing_org_policies in {env.answers}."
+        )
+    typer.echo("Next: stellar render")
 
 
 def _read_text(path):
@@ -796,10 +884,10 @@ def _render_diff(selected, answers, session, env, local_tools):
     for name in selected:
         workspace = env.workspace(name)
         text = _render_text(name, answers, session, env, local_tools)
-        entries = answers.imports.get(name, {})
-        imports_text = imports_lib.dumps(
-            entries, imports_lib.header(name, answers.prefix)
-        )
+        try:
+            imports_text = imports_lib.text(answers, name)
+        except imports_lib.ImportBlockError as error:
+            _fail(str(error))
         imports_target = workspace / imports_lib.filename(name)
         for target, content in (
             (workspace / _TFVARS, text),

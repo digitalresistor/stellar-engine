@@ -648,8 +648,78 @@ class TestSharedOrg:
         found = statuses(checks.check_shared_org(resolved(make_ctx)))
         assert found == {
             "shared.resources": Status.PASS,
+            "shared.org_policies": Status.PASS,
             "shared.iam": Status.PASS,
         }
+
+    def test_existing_org_policies_listed_pass(self, make_ctx, cloud):
+        cloud.org_policies = [
+            "iam.allowedPolicyMemberDomains",
+            "custom.kmsRotation",
+            "unmanaged.constraint",
+        ]
+        ctx = resolved(
+            make_ctx, existing_org_policies=("iam.allowedPolicyMemberDomains",)
+        )
+        result = by_id(checks.check_shared_org(ctx))["shared.org_policies"]
+        assert result.status == Status.PASS
+        assert "1 existing organization policy" in result.detail
+
+    def test_unlisted_org_policies_warn(self, make_ctx, cloud):
+        cloud.org_policies = [
+            "iam.allowedPolicyMemberDomains",
+            "storage.uniformBucketLevelAccess",
+        ]
+        ctx = resolved(
+            make_ctx, existing_org_policies=("iam.allowedPolicyMemberDomains",)
+        )
+        result = by_id(checks.check_shared_org(ctx))["shared.org_policies"]
+        assert result.status == Status.WARN
+        assert "storage.uniformBucketLevelAccess" in result.detail
+        assert (
+            "iam.allowedPolicyMemberDomains"
+            not in result.detail.split(": ")[-1]
+        )
+        assert result.remedy is not None
+        assert "stellar imports scan" in result.remedy
+
+    def test_org_policies_without_answers_only_count(self, make_ctx, cloud):
+        cloud.org_policies = ["iam.allowedPolicyMemberDomains"]
+        result = by_id(checks.check_shared_org(resolved(make_ctx)))[
+            "shared.org_policies"
+        ]
+        assert result.status == Status.PASS
+        assert "1 existing organization policy" in result.detail
+        assert "stellar imports scan" in result.detail
+
+    def test_org_policies_on_redeploy_only_count(self, make_ctx, cloud):
+        cloud.org_policies = ["iam.allowedPolicyMemberDomains"]
+        ctx = resolved(make_ctx, redeploy=True, existing_org_policies=())
+        result = by_id(checks.check_shared_org(ctx))["shared.org_policies"]
+        assert result.status == Status.PASS
+        assert "redeploy" in result.detail
+
+    def test_org_policies_follow_the_regime(self, make_ctx, cloud):
+        cloud.org_policies = [
+            "compute.managed.restrictProtocolForwardingCreationForTypes"
+        ]
+        ctx = resolved(
+            make_ctx, regime="FEDRAMP_MODERATE", existing_org_policies=()
+        )
+        result = by_id(checks.check_shared_org(ctx))["shared.org_policies"]
+        assert result.status == Status.PASS
+        assert "No organization policy" in result.detail
+        ctx = resolved(make_ctx, regime="IL5", existing_org_policies=())
+        result = by_id(checks.check_shared_org(ctx))["shared.org_policies"]
+        assert result.status == Status.WARN
+
+    def test_org_policy_list_error_warns(self, make_ctx, cloud):
+        cloud.org_policies = api.AccessDeniedError("no orgpolicy access")
+        result = by_id(checks.check_shared_org(resolved(make_ctx)))[
+            "shared.org_policies"
+        ]
+        assert result.status == Status.WARN
+        assert "no orgpolicy access" in result.detail
 
     def test_existing_org_resources_warn(self, make_ctx, cloud):
         cloud.custom_roles = {"tagViewer"}
