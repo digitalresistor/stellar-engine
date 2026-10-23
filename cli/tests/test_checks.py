@@ -475,6 +475,173 @@ class TestNaming:
             "naming.prefix": Status.SKIP,
         }
 
+    def test_no_tenant_or_import_results_without_ids(self, make_ctx):
+        found = statuses(checks.check_naming(resolved(make_ctx)))
+        for check_id in (
+            "naming.tenant_projects",
+            "naming.deleted_tenant_projects",
+            "naming.imported_projects",
+        ):
+            assert check_id not in found
+
+
+TENANT_IDS = ("tst-prod-ten1-iac-core-0", "tst-prod-ten1-main-0")
+CORE = "tst-prod-iac-core-0"
+LOGS = "tst-prod-audit-logs-0"
+
+
+class TestTenantProjects:
+    def test_pass(self, make_ctx):
+        ctx = resolved(make_ctx, tenant_project_ids=TENANT_IDS)
+        found = by_id(checks.check_naming(ctx))
+        assert found["naming.tenant_projects"].status == Status.PASS
+        assert "Stage 1" in found["naming.tenant_projects"].detail
+        assert found["naming.deleted_tenant_projects"].status == Status.PASS
+        assert "Stage 1 project ID" in (
+            found["naming.deleted_tenant_projects"].detail
+        )
+
+    def test_active_collision_fails(self, make_ctx, cloud):
+        cloud.projects[TENANT_IDS[1]] = "ACTIVE"
+        ctx = resolved(make_ctx, tenant_project_ids=TENANT_IDS)
+        found = by_id(checks.check_naming(ctx))
+        tenant = found["naming.tenant_projects"]
+        assert tenant.status == Status.FAIL
+        assert TENANT_IDS[1] in tenant.detail
+        assert "--redeploy" in remedy(tenant)
+        # Stage 0 results stay separate.
+        assert found["naming.projects"].status == Status.PASS
+
+    def test_active_collision_warns_on_redeploy(self, make_ctx, cloud):
+        cloud.projects[TENANT_IDS[0]] = "ACTIVE"
+        ctx = resolved(make_ctx, tenant_project_ids=TENANT_IDS, redeploy=True)
+        found = statuses(checks.check_naming(ctx))
+        assert found["naming.tenant_projects"] == Status.WARN
+
+    def test_soft_deleted_fails(self, make_ctx, cloud):
+        cloud.projects[TENANT_IDS[0]] = "DELETE_REQUESTED"
+        ctx = resolved(make_ctx, tenant_project_ids=TENANT_IDS, redeploy=True)
+        found = by_id(checks.check_naming(ctx))
+        deleted = found["naming.deleted_tenant_projects"]
+        assert deleted.status == Status.FAIL
+        assert deleted.title == "Soft-deleted tenant projects"
+        assert f"gcloud projects undelete {TENANT_IDS[0]}" in remedy(deleted)
+        assert found["naming.deleted_projects"].status == Status.PASS
+
+    def test_cloud_error_warns(self, make_ctx, cloud):
+        cloud.projects[TENANT_IDS[0]] = api.ApiDisabledError(
+            "cloudresourcemanager.googleapis.com", "1"
+        )
+        ctx = resolved(make_ctx, tenant_project_ids=TENANT_IDS)
+        found = statuses(checks.check_naming(ctx))
+        assert found["naming.tenant_projects"] == Status.WARN
+        assert "naming.deleted_tenant_projects" not in found
+        assert found["naming.projects"] == Status.PASS
+
+
+class TestImportedProjects:
+    def test_active_imported_ids_pass_instead_of_colliding(
+        self, make_ctx, cloud
+    ):
+        cloud.projects[CORE] = "ACTIVE"
+        cloud.projects[LOGS] = "ACTIVE"
+        ctx = resolved(make_ctx, imported_project_ids=(CORE, LOGS))
+        found = by_id(checks.check_naming(ctx))
+        assert found["naming.projects"].status == Status.PASS
+        imported = found["naming.imported_projects"]
+        assert imported.status == Status.PASS
+        assert "Pre-created" in imported.detail
+        assert CORE in imported.detail
+        assert LOGS in imported.detail
+
+    def test_other_stage0_ids_still_collide(self, make_ctx, cloud):
+        cloud.projects[CORE] = "ACTIVE"
+        cloud.projects["tst-prod-billing-exp-0"] = "ACTIVE"
+        ctx = resolved(make_ctx, imported_project_ids=(CORE,))
+        found = by_id(checks.check_naming(ctx))
+        projects = found["naming.projects"]
+        assert projects.status == Status.FAIL
+        assert "tst-prod-billing-exp-0" in projects.detail
+        assert CORE not in projects.detail
+        assert found["naming.imported_projects"].status == Status.PASS
+
+    @pytest.mark.parametrize(
+        "billing",
+        [{"billing_no_iam": True}, {"billing_is_org_level": False}],
+    )
+    def test_skipped_billing_export_id_does_not_collide(
+        self, make_ctx, cloud, billing
+    ):
+        # Lab shape: pre-created projects, billing_account.no_iam true, and
+        # an active project that holds the billing export ID.
+        cloud.projects[CORE] = "ACTIVE"
+        cloud.projects[LOGS] = "ACTIVE"
+        cloud.projects["tst-prod-billing-exp-0"] = "ACTIVE"
+        ctx = resolved(make_ctx, imported_project_ids=(CORE, LOGS), **billing)
+        found = by_id(checks.check_naming(ctx))
+        assert found["naming.projects"].status == Status.PASS
+        assert found["naming.deleted_projects"].status == Status.PASS
+        assert found["naming.imported_projects"].status == Status.PASS
+        assert not any(
+            result.status == Status.FAIL for result in found.values()
+        )
+
+    def test_imported_tenant_id_passes(self, make_ctx, cloud):
+        cloud.projects[TENANT_IDS[0]] = "ACTIVE"
+        ctx = resolved(
+            make_ctx,
+            tenant_project_ids=TENANT_IDS,
+            imported_project_ids=(TENANT_IDS[0],),
+        )
+        found = statuses(checks.check_naming(ctx))
+        assert found["naming.tenant_projects"] == Status.PASS
+        assert found["naming.imported_projects"] == Status.PASS
+
+    def test_missing_imported_id_fails(self, make_ctx):
+        ctx = resolved(make_ctx, imported_project_ids=(CORE,))
+        found = by_id(checks.check_naming(ctx))
+        imported = found["naming.imported_projects"]
+        assert imported.status == Status.FAIL
+        assert CORE in imported.detail
+        assert "cannot see" in imported.detail
+        assert "imports" in remedy(imported)
+        assert imported.doc == checks.DDG_STAGE0
+
+    def test_soft_deleted_imported_id_fails(self, make_ctx, cloud):
+        cloud.projects[CORE] = "DELETE_REQUESTED"
+        ctx = resolved(make_ctx, imported_project_ids=(CORE,), redeploy=True)
+        found = by_id(checks.check_naming(ctx))
+        imported = found["naming.imported_projects"]
+        assert imported.status == Status.FAIL
+        assert "soft-deleted" in imported.detail
+        assert f"gcloud projects undelete {CORE}" in remedy(imported)
+        # The imported ID is reported once, not also as a Stage 0 holder.
+        assert found["naming.deleted_projects"].status == Status.PASS
+
+    def test_missing_and_deleted_are_both_reported(self, make_ctx, cloud):
+        cloud.projects[LOGS] = "DELETE_REQUESTED"
+        ctx = resolved(make_ctx, imported_project_ids=(CORE, LOGS))
+        imported = by_id(checks.check_naming(ctx))["naming.imported_projects"]
+        assert imported.status == Status.FAIL
+        assert CORE in imported.detail
+        assert LOGS in imported.detail
+        assert "Pre-create" in remedy(imported)
+        assert f"undelete {LOGS}" in remedy(imported)
+
+    def test_cloud_error_warns(self, make_ctx, cloud):
+        cloud.projects[CORE] = api.ApiDisabledError(
+            "cloudresourcemanager.googleapis.com", "1"
+        )
+        ctx = resolved(make_ctx, imported_project_ids=(CORE,))
+        found = statuses(checks.check_naming(ctx))
+        assert found["naming.imported_projects"] == Status.WARN
+        assert found["naming.projects"] == Status.PASS
+
+    def test_invalid_prefix_skips_imports(self, make_ctx):
+        ctx = make_ctx(prefix="Bad", imported_project_ids=(CORE,))
+        found = statuses(checks.check_naming(ctx))
+        assert "naming.imported_projects" not in found
+
 
 class TestSharedOrg:
     def test_clean_org(self, make_ctx):
