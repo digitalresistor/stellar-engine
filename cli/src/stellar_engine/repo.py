@@ -37,7 +37,9 @@ from stellar_engine.render import hcl
 _SERVICES_RE = re.compile(r'^list_of_services="([^"]+)"', re.MULTILINE)
 _PREFIX_LIMIT_RE = re.compile(r"length\(var\.prefix\),\s*0\)\s*<=\s*(\d+)")
 _TENANT_KEY_LIMIT_RE = re.compile(r"length\(k\)\s*(<=?)\s*(\d+)")
-_GROUP_DEFAULT_RE = re.compile(
+# An object type attribute with a string default, such as a field of the
+# Stage 0 `groups` or `project_deletion_policies` type.
+_OPTIONAL_DEFAULT_RE = re.compile(
     r'([\w-]+)\s*=\s*optional\(string,\s*"([^"]+)"\)'
 )
 # python-hcl2 returns a conditional such as `cond ? {} : { ... }` as one
@@ -87,6 +89,18 @@ _AUTO_TFVARS_LOCALS = {
 # `count = local.billing_mode == "org" ? 1 : 0`.
 BILLING_EXPORT_MODULE = "billing-export-project"
 _PROJECT_MODULE_SOURCE = "modules/project"
+# The Stage 0 file and module label of each project that Stage 0 creates.
+_STAGE0_PROJECT_MODULES = (
+    ("automation.tf", "automation-project"),
+    ("log-export.tf", "log-export-project"),
+    ("billing.tf", BILLING_EXPORT_MODULE),
+)
+# Newer Stage 0 versions declare this object variable and pass one of its
+# keys to the `deletion_policy` of each project module.
+PROJECT_DELETION_POLICIES = "project_deletion_policies"
+_DELETION_POLICY_REF_RE = re.compile(
+    rf"^\$\{{var\.{PROJECT_DELETION_POLICIES}\.(?P<key>[A-Za-z_][\w-]*)\}}$"
+)
 
 
 class RepoError(Exception):
@@ -392,7 +406,7 @@ class Repo:
             `{"gcp-support": "gcp-devops"}`.
         """
         group_type = self._bootstrap_variables["groups"]["type"]
-        return dict(_GROUP_DEFAULT_RE.findall(group_type))
+        return dict(_OPTIONAL_DEFAULT_RE.findall(group_type))
 
     def regime_names(self):
         """Returns the compliance regimes in the Stage 0 `regime_mapping`."""
@@ -566,24 +580,93 @@ class Repo:
             )
         ]
 
+    def project_deletion_policy_keys(self):
+        """Maps each Stage 0 project module to its deletion policy key.
+
+        A Stage 0 version that declares the `project_deletion_policies`
+        variable passes `var.project_deletion_policies.<key>` as the
+        `deletion_policy` of each project module. Older versions declare no
+        such variable, so the CLI cannot keep a project on destroy there.
+
+        Returns:
+            Module label to variable key, such as
+            `{"automation-project": "automation"}`, empty when Stage 0 does
+            not declare the variable.
+
+        Raises:
+            RepoError: If a Stage 0 project has no project module.
+        """
+        if PROJECT_DELETION_POLICIES not in self.stage_variable_names(
+            paths.BOOTSTRAP
+        ):
+            return {}
+        keys = {}
+        for module, body in self._stage0_module_bodies.items():
+            match = _DELETION_POLICY_REF_RE.match(
+                str(body.get("deletion_policy", ""))
+            )
+            if match:
+                keys[module] = match.group("key")
+        return keys
+
+    def stage0_deletion_policies(self):
+        """Returns the deletion policy of each Stage 0 project by default.
+
+        This is the policy without a tfvars value: the default of the
+        `project_deletion_policies` key that the module reads, a literal
+        `deletion_policy` of the module, or else the `deletion_policy`
+        default of `modules/project`. Terraform also uses the module default
+        for a key without a default, because that variable is not nullable.
+
+        Returns:
+            Module label to policy, such as `{"automation-project":
+            "DELETE"}`, in `stage0_projects` order.
+
+        Raises:
+            RepoError: If a Stage 0 project has no project module, or
+                `modules/project` declares no `deletion_policy` default.
+        """
+        keys = self.project_deletion_policy_keys()
+        key_defaults = {}
+        if keys:
+            variable = self.stage_variables(paths.BOOTSTRAP)[
+                PROJECT_DELETION_POLICIES
+            ]
+            key_defaults = dict(
+                _OPTIONAL_DEFAULT_RE.findall(str(variable.get("type", "")))
+            )
+        policies = {}
+        for module, body in self._stage0_module_bodies.items():
+            literal = hcl.unquote(body.get("deletion_policy"))
+            if module in keys:
+                policy = key_defaults.get(keys[module])
+            elif isinstance(literal, str) and "${" not in literal:
+                policy = literal
+            else:
+                policy = None
+            policies[module] = policy or self._project_module_deletion_policy
+        return policies
+
     @functools.cached_property
-    def _stage0_projects(self):
-        names = [
-            ("automation.tf", "automation-project"),
-            ("log-export.tf", "log-export-project"),
-            ("billing.tf", BILLING_EXPORT_MODULE),
-        ]
-        resource_index = ""
-        project_main = _load_hcl(self.root / "modules/project/main.tf")
-        for block in project_main.get("resource", []):
-            for label, bodies in block.items():
-                if hcl.unquote(label) != "google_project":
-                    continue
-                for name, body in bodies.items():
-                    if hcl.unquote(name) == "project":
-                        resource_index = _counted(body)
-        projects = []
-        for filename, module in names:
+    def _project_module_deletion_policy(self):
+        parsed = _load_hcl(self.root / "modules/project/variables.tf")
+        for block in parsed.get("variable", []):
+            for name, body in block.items():
+                if hcl.unquote(name) == "deletion_policy":
+                    default = hcl.unquote(body.get("default"))
+                    if isinstance(default, str):
+                        return default
+        raise RepoError("modules/project declares no deletion_policy default")
+
+    @functools.cached_property
+    def _stage0_module_bodies(self):
+        """Maps each Stage 0 project module label to its parsed body.
+
+        Raises:
+            RepoError: If a Stage 0 project has no project module.
+        """
+        bodies = {}
+        for filename, module in _STAGE0_PROJECT_MODULES:
             body = None
             for block in _load_hcl(self.bootstrap_dir / filename).get(
                 "module", []
@@ -594,6 +677,22 @@ class Repo:
             source = hcl.unquote(body.get("source", "")) if body else ""
             if body is None or not str(source).endswith(_PROJECT_MODULE_SOURCE):
                 raise RepoError(f"No Stage 0 project module {module}")
+            bodies[module] = body
+        return bodies
+
+    @functools.cached_property
+    def _stage0_projects(self):
+        resource_index = ""
+        project_main = _load_hcl(self.root / "modules/project/main.tf")
+        for block in project_main.get("resource", []):
+            for label, bodies in block.items():
+                if hcl.unquote(label) != "google_project":
+                    continue
+                for name, body in bodies.items():
+                    if hcl.unquote(name) == "project":
+                        resource_index = _counted(body)
+        projects = []
+        for module, body in self._stage0_module_bodies.items():
             count = body.get("count")
             projects.append(
                 Stage0Project(

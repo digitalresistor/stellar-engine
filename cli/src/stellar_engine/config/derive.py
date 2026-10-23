@@ -19,11 +19,15 @@ the stage code has one place to follow here.
 """
 
 from stellar_engine import naming
+from stellar_engine import paths
 from stellar_engine import repo as repo_lib
 from stellar_engine.config import models
 
 ORGANIZATION_ADMINS = "gcp-organization-admins"
 DEVOPS = "gcp-devops"
+# The `deletion_policy` of `modules/project` that leaves the project in
+# place when Terraform destroys the module.
+ABANDON = "ABANDON"
 
 
 def kms_protection_level(answers: models.Answers) -> str:
@@ -179,21 +183,6 @@ def stage0_projects(
     )
 
 
-def stage0_project_ids(
-    answers: models.Answers, repo: repo_lib.Repo
-) -> list[str]:
-    """Returns the IDs of the projects Stage 0 creates for these answers.
-
-    Args:
-        answers: The environment answers.
-        repo: The engine checkout.
-    """
-    return [
-        stage0_project_id(answers, project)
-        for project in stage0_projects(answers, repo)
-    ]
-
-
 def tenant_project_ids(answers: models.Answers) -> dict[str, list[str]]:
     """Returns the project IDs Stage 1 creates for each tenant.
 
@@ -231,4 +220,77 @@ def tenant_service_account_ids(
             answers.prefix, answers.resman.envs, tenant
         )
         for tenant in answers.resman.tenants
+    }
+
+
+def kept_stage0_projects(
+    answers: models.Answers, repo: repo_lib.Repo
+) -> list[repo_lib.Stage0Project]:
+    """Returns the imported Stage 0 projects that Stage 0 destroy keeps.
+
+    A project counts when `keep_imported_projects` is true, Stage 0
+    creates it for these answers, and `imports.0-bootstrap` adopts its
+    `google_project` resource.
+
+    Args:
+        answers: The environment answers.
+        repo: The engine checkout.
+    """
+    if not answers.keep_imported_projects:
+        return []
+    imported = answers.imports.get(paths.BOOTSTRAP, {})
+    return [
+        project
+        for project in stage0_projects(answers, repo)
+        if project.address in imported
+    ]
+
+
+def project_deletion_policies(
+    answers: models.Answers, repo: repo_lib.Repo
+) -> dict[str, str]:
+    """Returns the Stage 0 `project_deletion_policies` value to write.
+
+    Args:
+        answers: The environment answers.
+        repo: The engine checkout.
+
+    Returns:
+        Variable key to ABANDON for each kept project, such as
+        `{"automation": "ABANDON"}`. Empty when no project is kept or the
+        Stage 0 version declares no `project_deletion_policies` variable.
+    """
+    keys = repo.project_deletion_policy_keys()
+    return {
+        keys[project.module]: ABANDON
+        for project in kept_stage0_projects(answers, repo)
+        if project.module in keys
+    }
+
+
+def stage0_deletion_policies(
+    answers: models.Answers, repo: repo_lib.Repo
+) -> dict[str, str]:
+    """Returns the deletion policy of each Stage 0 project for these answers.
+
+    Args:
+        answers: The environment answers.
+        repo: The engine checkout.
+
+    Returns:
+        Project ID to deletion policy, such as `{"abc-prod-iac-core-0":
+        "ABANDON"}`, for the projects Stage 0 creates.
+    """
+    keys = repo.project_deletion_policy_keys()
+    defaults = repo.stage0_deletion_policies()
+    kept = {
+        project.module
+        for project in kept_stage0_projects(answers, repo)
+        if project.module in keys
+    }
+    return {
+        stage0_project_id(answers, project): (
+            ABANDON if project.module in kept else defaults[project.module]
+        )
+        for project in stage0_projects(answers, repo)
     }

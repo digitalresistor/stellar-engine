@@ -490,7 +490,9 @@ def test_bootstrap_precreated_projects_become_imports(
     data = helpers.minimal_data(
         billing={"account_id": conftest.BILLING, **billing}
     )
-    result, prompter = _run(data, [None, True], repo, discovered, ["bootstrap"])
+    result, prompter = _run(
+        data, [None, True, None], repo, discovered, ["bootstrap"]
+    )
     assert result["imports"] == {"0-bootstrap": expected}
     assert (
         f"  import {conftest.AUTOMATION_ADDRESS} = tst-prod-iac-core-0"
@@ -507,7 +509,9 @@ def test_bootstrap_notes_why_billing_export_is_not_imported(
     data = helpers.minimal_data(
         billing={"account_id": conftest.BILLING, **billing}
     )
-    _, prompter = _run(data, [None, True], repo, discovered, ["bootstrap"])
+    _, prompter = _run(
+        data, [None, True, None], repo, discovered, ["bootstrap"]
+    )
     assert (
         f"  Stage 0 creates {conftest.BILLING_EXPORT_ADDRESS} only when "
         "billing.no_iam is false and billing.is_org_level is true, so "
@@ -562,7 +566,7 @@ def test_bootstrap_rerun_defaults_to_existing_imports(repo, discovered):
             "0-bootstrap": {conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0"}
         },
     )
-    result, _ = _run(data, [None, None], repo, discovered, ["bootstrap"])
+    result, _ = _run(data, [None, None, None], repo, discovered, ["bootstrap"])
     assert set(result["imports"]["0-bootstrap"]) == {
         conftest.AUTOMATION_ADDRESS,
         conftest.LOG_EXPORT_ADDRESS,

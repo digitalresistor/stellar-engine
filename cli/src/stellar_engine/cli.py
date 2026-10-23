@@ -574,9 +574,10 @@ def env_show(
     typer.echo(
         f"  Assured Workloads location: {derive.compliance_location(answers)}"
     )
-    typer.echo("  Stage 0 project IDs:")
-    for project_id in derive.stage0_project_ids(answers, session.repo):
-        typer.echo(f"    {project_id}")
+    typer.echo("  Stage 0 project IDs and deletion policies:")
+    policies = derive.stage0_deletion_policies(answers, session.repo)
+    for project_id, policy in policies.items():
+        typer.echo(f"    {project_id}  {policy}")
     for tenant, project_ids in derive.tenant_project_ids(answers).items():
         typer.echo(f"  Tenant {tenant} project IDs:")
         for project_id in project_ids:
@@ -813,6 +814,8 @@ def render(
         )
     for name in selected:
         for line in imports_lib.warnings(answers, name, session.repo):
+            _warn(line)
+        for line in stages_lib.warnings(answers, name, session.repo):
             _warn(line)
     local_tools = tools_lib.SystemTools()
     if show_diff:

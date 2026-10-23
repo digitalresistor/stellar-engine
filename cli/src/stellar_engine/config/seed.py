@@ -35,6 +35,8 @@ from stellar_engine.preflight import regions
 # would make the new environment adopt projects it does not own. The
 # existing organization policies describe the source organization as the
 # last scan saw it, so the new environment scans its own.
+# keep_imported_projects is a preference rather than organization state, so
+# it carries and applies once the new environment adds its own imports.
 NEVER_CARRIED = ("prefix", "engine", "imports", "existing_org_policies")
 
 SUFFIX_LENGTH = 4

@@ -1017,3 +1017,57 @@ def test_env_show_lists_existing_org_policies(runner, isolated_home):
     assert outcome.exit_code == 0, outcome.output
     assert "Existing organization policies" in outcome.output
     assert "  iam.allowedPolicyMemberDomains" in outcome.output
+
+
+_AUTOMATION_IMPORT = (
+    f'imports.0-bootstrap."{conftest.AUTOMATION_ADDRESS}"=tst-prod-iac-core-0'
+)
+
+
+def _engine_invoke(runner, engine, *args):
+    return runner.invoke(cli.app, [*args, "--repo", str(engine)])
+
+
+def _init_engine(runner, engine):
+    return _engine_invoke(
+        runner,
+        engine,
+        "init",
+        "--non-interactive",
+        "--prefix",
+        "tst",
+        *_sets(_AUTOMATION_IMPORT),
+    )
+
+
+def test_render_warns_when_the_engine_cannot_keep_projects(
+    runner, isolated_home, fake_tools, tmp_path
+):
+    engine = helpers.deletion_policy_engine(tmp_path / "engine", declared=False)
+    assert _init_engine(runner, engine).exit_code == 0
+    outcome = _engine_invoke(runner, engine, "render", "--stage", "0")
+    assert outcome.exit_code == 0, outcome.output
+    assert (
+        "Warning: keep_imported_projects is true, but this engine version "
+        "of 0-bootstrap cannot keep imported projects on destroy yet, so "
+        "terraform destroy deletes tst-prod-iac-core-0."
+    ) in outcome.output
+    show = _engine_invoke(runner, engine, "env", "show")
+    assert "    tst-prod-iac-core-0  DELETE" in show.output
+
+
+def test_render_and_show_keep_imported_projects(
+    runner, isolated_home, fake_tools, tmp_path
+):
+    engine = helpers.deletion_policy_engine(tmp_path / "engine")
+    outcome = _init_engine(runner, engine)
+    assert outcome.exit_code == 0, outcome.output
+    rendered = _engine_invoke(runner, engine, "render", "--stage", "0")
+    assert rendered.exit_code == 0, rendered.output
+    assert "keep_imported_projects" not in rendered.output
+    tfvars = _workspace(isolated_home, "0-bootstrap") / "terraform.tfvars"
+    assert 'automation = "ABANDON"' in tfvars.read_text()
+    show = _engine_invoke(runner, engine, "env", "show")
+    assert show.exit_code == 0, show.output
+    assert "    tst-prod-iac-core-0  ABANDON" in show.output
+    assert "    tst-prod-audit-logs-0  DELETE" in show.output

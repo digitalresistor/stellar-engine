@@ -145,8 +145,12 @@ def test_tenant_locations():
     }
 
 
+def _stage0_project_ids(answers, repo):
+    return list(derive.stage0_deletion_policies(answers, repo))
+
+
 def test_stage0_project_ids(repo):
-    assert derive.stage0_project_ids(helpers.minimal_answers(), repo) == [
+    assert _stage0_project_ids(helpers.minimal_answers(), repo) == [
         "tst-prod-iac-core-0",
         "tst-prod-audit-logs-0",
         "tst-prod-billing-exp-0",
@@ -158,7 +162,7 @@ def test_stage0_project_ids_skip_billing_export(repo, billing):
     answers = helpers.minimal_answers(
         billing={"account_id": conftest.BILLING, **billing}
     )
-    assert derive.stage0_project_ids(answers, repo) == [
+    assert _stage0_project_ids(answers, repo) == [
         "tst-prod-iac-core-0",
         "tst-prod-audit-logs-0",
     ]

@@ -50,6 +50,11 @@ _KMS_COMMENT_DERIVED = (
 _KMS_COMMENT_EXPLICIT = (
     "# KMS protection level for CMEK keys, which answers.yaml sets.",
 )
+_DELETION_POLICIES_COMMENT = (
+    "# Deletion policy of the Stage 0 projects that the imports adopt.",
+    "# stellar writes ABANDON while keep_imported_projects is true in",
+    "# answers.yaml, so terraform destroy keeps those projects.",
+)
 _OUTPUTS_COMMENT = (
     "# Per-environment folder for the provider and tfvars files that later",
     "# stages read. stellar derives it from the home on every render.",
@@ -136,6 +141,9 @@ def _bootstrap(
         values["groups"] = renamed
     if answers.billing_override is not None:
         values["billing_override"] = answers.billing_override.model_dump()
+    policies = derive.project_deletion_policies(answers, repo)
+    if policies:
+        values[repo_lib.PROJECT_DELETION_POLICIES] = policies
     # bootstrap_user is never written: the DDG passes it with -var on the
     # first apply only, and a stored value would keep the user's grants.
     return values
@@ -231,6 +239,10 @@ def _comments(
             if answers.kms_protection_level
             else _KMS_COMMENT_DERIVED
         )
+    if repo_lib.PROJECT_DELETION_POLICIES in comments:
+        comments[repo_lib.PROJECT_DELETION_POLICIES] = list(
+            _DELETION_POLICIES_COMMENT
+        )
     if "outputs_location" in comments and not comments["outputs_location"]:
         comments["outputs_location"] = list(_OUTPUTS_COMMENT)
     for key in overridden:
@@ -239,6 +251,43 @@ def _comments(
                 f"# overrides.{stage} in answers.yaml sets this value."
             ]
     return comments
+
+
+def warnings(
+    answers: models.Answers, stage: str, repo: repo_lib.Repo
+) -> list[str]:
+    """Returns non-fatal findings about the rendered tfvars of a stage.
+
+    The arguments follow `imports.warnings`, which `render` calls next to
+    this function.
+
+    Args:
+        answers: The environment answers.
+        stage: Stage name or alias, such as `0`.
+        repo: The engine checkout.
+
+    Returns:
+        Readable sentences, one when `keep_imported_projects` asks to keep
+        imported Stage 0 projects that this Stage 0 version cannot keep.
+
+    Raises:
+        ValueError: If the stage name is unknown.
+    """
+    if paths.resolve_stage(stage) != paths.BOOTSTRAP:
+        return []
+    keys = repo.project_deletion_policy_keys()
+    unkept = [
+        derive.stage0_project_id(answers, project)
+        for project in derive.kept_stage0_projects(answers, repo)
+        if project.module not in keys
+    ]
+    if not unkept:
+        return []
+    return [
+        f"keep_imported_projects is true, but this engine version of "
+        f"{paths.BOOTSTRAP} cannot keep imported projects on destroy yet, "
+        f"so terraform destroy deletes {', '.join(unkept)}."
+    ]
 
 
 def header(repo: repo_lib.Repo, stage: str, prefix: str) -> list[str]:
