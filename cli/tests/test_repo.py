@@ -87,6 +87,38 @@ def test_prefix_limit_matches_resman(repo):
     assert "Use a maximum of 7 characters for prefix." in resman
 
 
+def test_tenant_key_limit_matches_resman(repo):
+    variables = (repo.root / repo_lib.RESMAN_DIR / "variables.tf").read_text(
+        encoding="utf-8"
+    )
+    assert repo.tenant_key_max_length() == 6
+    assert "Tenant keys must be less than 7 characters." in variables
+
+
+@pytest.mark.parametrize(
+    ("condition", "limit"),
+    [("length(k) < 9", 8), ("length(k) <= 9", 9)],
+)
+def test_tenant_key_limit_reads_both_bounds(tmp_path, condition, limit):
+    resman = tmp_path / repo_lib.RESMAN_DIR
+    resman.mkdir(parents=True)
+    (resman / "variables.tf").write_text(
+        'variable "tenants" {\n  validation {\n'
+        f"    condition = alltrue([for k, _ in var.tenants : {condition}])\n"
+        "  }\n}\n",
+        encoding="utf-8",
+    )
+    assert repo_lib.Repo(tmp_path).tenant_key_max_length() == limit
+
+
+def test_tenant_key_limit_missing_raises(tmp_path):
+    resman = tmp_path / repo_lib.RESMAN_DIR
+    resman.mkdir(parents=True)
+    (resman / "variables.tf").write_text("", encoding="utf-8")
+    with pytest.raises(repo_lib.RepoError):
+        repo_lib.Repo(tmp_path).tenant_key_max_length()
+
+
 def test_default_groups(repo):
     groups = repo.default_groups()
     assert groups["gcp-support"] == "gcp-devops"
@@ -214,3 +246,31 @@ def test_doc_links_resolve(doc):
         if line.startswith("#")
     }
     assert anchor in slugs, f"{doc} has no matching heading"
+
+
+def test_stage0_projects(repo):
+    projects = repo.stage0_projects()
+    assert [project.name for project in projects] == [
+        "iac-core-0",
+        "audit-logs-0",
+        "billing-exp-0",
+    ]
+    assert [project.module for project in projects] == [
+        "automation-project",
+        "log-export-project",
+        repo_lib.BILLING_EXPORT_MODULE,
+    ]
+    assert repo.stage0_project_names() == [p.name for p in projects]
+
+
+@pytest.mark.parametrize(
+    ("no_iam", "is_org_level", "expected"),
+    [(False, True, True), (True, True, False), (False, False, False)],
+)
+def test_stage0_project_created_follows_billing_mode(
+    repo, no_iam, is_org_level, expected
+):
+    automation, _, billing_export = repo.stage0_projects()
+    flags = {"no_iam": no_iam, "is_org_level": is_org_level}
+    assert repo_lib.stage0_project_created(automation, **flags)
+    assert repo_lib.stage0_project_created(billing_export, **flags) is expected

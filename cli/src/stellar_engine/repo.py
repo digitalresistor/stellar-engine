@@ -32,9 +32,11 @@ from packaging import version
 import yaml
 
 BOOTSTRAP_DIR = pathlib.Path("fast/stages-aw/0-bootstrap")
+RESMAN_DIR = pathlib.Path("fast/stages-aw/1-resman")
 
 _SERVICES_RE = re.compile(r'^list_of_services="([^"]+)"', re.MULTILINE)
 _PREFIX_LIMIT_RE = re.compile(r"length\(var\.prefix\),\s*0\)\s*<=\s*(\d+)")
+_TENANT_KEY_LIMIT_RE = re.compile(r"length\(k\)\s*(<=?)\s*(\d+)")
 _GROUP_DEFAULT_RE = re.compile(
     r'([\w-]+)\s*=\s*optional\(string,\s*"([^"]+)"\)'
 )
@@ -50,10 +52,74 @@ _HOLDER_KEY_RE = re.compile(
     r"|(?P<domain>domain):\$\{var\.organization\.domain\})$"
 )
 _VERSION_FLOOR_RE = re.compile(r">=\s*([0-9.]+)")
+# Stage 0 writes `local.tfvars` to `0-bootstrap.auto.tfvars.json` and
+# `local.tfvars_globals` to `0-globals.auto.tfvars.json` in
+# `outputs-files.tf`; `fast/stage-links.sh` links both into Stage 1. Stage 0
+# reads no output files.
+_AUTO_TFVARS_LOCALS = {
+    "0-bootstrap": (),
+    "1-resman": ("tfvars", "tfvars_globals"),
+}
+
+
+# `module "billing-export-project"` in `0-bootstrap/billing.tf` has
+# `count = local.billing_mode == "org" ? 1 : 0`.
+BILLING_EXPORT_MODULE = "billing-export-project"
+_PROJECT_MODULE_SOURCE = "modules/project"
 
 
 class RepoError(Exception):
     """Raised when the repository layout does not match expectations."""
+
+
+@dataclasses.dataclass(frozen=True)
+class Stage0Project:
+    """A project that a Stage 0 `modules/project` call creates.
+
+    Attributes:
+        module: Module label, such as `automation-project`.
+        name: Project name, the ID suffix after `<prefix>-prod-`.
+        address: Address of the module's `google_project` resource, which
+            an import block adopts.
+        count: The module `count` expression, or None when it has none.
+    """
+
+    module: str
+    name: str
+    address: str
+    count: str | None = None
+
+
+def billing_export_created(*, no_iam: bool, is_org_level: bool) -> bool:
+    """Returns whether Stage 0 creates the billing export project.
+
+    Mirrors `local.billing_mode` in `0-bootstrap/billing.tf`, which is "org"
+    only when Stage 0 manages billing IAM on an organization-level account.
+
+    Args:
+        no_iam: The `billing_account.no_iam` value.
+        is_org_level: The `billing_account.is_org_level` value.
+    """
+    return not no_iam and is_org_level
+
+
+def stage0_project_created(
+    project: Stage0Project, *, no_iam: bool, is_org_level: bool
+) -> bool:
+    """Returns whether Stage 0 creates a project for these billing answers.
+
+    Args:
+        project: A Stage 0 project from `Repo.stage0_projects`.
+        no_iam: The `billing_account.no_iam` value.
+        is_org_level: The `billing_account.is_org_level` value.
+    """
+    if project.module == BILLING_EXPORT_MODULE:
+        return billing_export_created(no_iam=no_iam, is_org_level=is_org_level)
+    return True
+
+
+def _counted(body):
+    return "" if body.get("count") is None else "[0]"
 
 
 class HolderKind(enum.StrEnum):
@@ -193,6 +259,25 @@ class Repo:
             raise RepoError("Cannot find the prefix length validation")
         return int(match.group(1))
 
+    def tenant_key_max_length(self):
+        """Returns the tenant key length limit from the Stage 1 validation.
+
+        The `tenants` variable in `1-resman/variables.tf` writes the limit
+        as `length(k) < 7`, so the strict bound is converted to the longest
+        allowed key length.
+
+        Raises:
+            RepoError: If the validation block cannot be found.
+        """
+        text = (self.root / RESMAN_DIR / "variables.tf").read_text(
+            encoding="utf-8"
+        )
+        match = _TENANT_KEY_LIMIT_RE.search(text)
+        if not match:
+            raise RepoError("Cannot find the tenant key length validation")
+        limit = int(match.group(2))
+        return limit if match.group(1) == "<=" else limit - 1
+
     def default_groups(self):
         """Returns the default group names from the Stage 0 `groups` type.
 
@@ -259,14 +344,72 @@ class Repo:
         }
 
     def stage0_project_names(self):
-        """Returns the names of the projects Stage 0 creates.
+        """Returns the names of the projects Stage 0 can create.
 
-        The project ID is `<prefix>-prod-<name>`.
+        The project ID is `<prefix>-prod-<name>`. The billing export project
+        is included even though Stage 0 only creates it for some billing
+        answers; see `stage0_project_created`.
         """
-        names = [self._module_names("automation.tf")["automation-project"]]
-        names.append(self._module_names("log-export.tf")["log-export-project"])
-        names.append(self._module_names("billing.tf")["billing-export-project"])
-        return names
+        return [project.name for project in self.stage0_projects()]
+
+    def stage0_projects(self):
+        """Returns the projects Stage 0 can create, with their addresses.
+
+        Each address comes from the stage code: the `modules/project` call
+        in `0-bootstrap` whose `name` is a Stage 0 project name, indexed
+        `[0]` when the module or the module's `google_project` resource has
+        a `count`.
+
+        Returns:
+            A tuple of `Stage0Project`: the automation, log export and
+            billing export projects, in that order.
+
+        Raises:
+            RepoError: If a Stage 0 project has no project module.
+        """
+        return self._stage0_projects
+
+    @functools.cached_property
+    def _stage0_projects(self):
+        names = [
+            ("automation.tf", "automation-project"),
+            ("log-export.tf", "log-export-project"),
+            ("billing.tf", BILLING_EXPORT_MODULE),
+        ]
+        resource_index = ""
+        project_main = _load_hcl(self.root / "modules/project/main.tf")
+        for block in project_main.get("resource", []):
+            for label, bodies in block.items():
+                if _unquote(label) != "google_project":
+                    continue
+                for name, body in bodies.items():
+                    if _unquote(name) == "project":
+                        resource_index = _counted(body)
+        projects = []
+        for filename, module in names:
+            body = None
+            for block in _load_hcl(self.bootstrap_dir / filename).get(
+                "module", []
+            ):
+                for label, candidate in block.items():
+                    if _unquote(label) == module:
+                        body = candidate
+            source = _unquote(body.get("source", "")) if body else ""
+            if body is None or not str(source).endswith(_PROJECT_MODULE_SOURCE):
+                raise RepoError(f"No Stage 0 project module {module}")
+            count = body.get("count")
+            projects.append(
+                Stage0Project(
+                    module=module,
+                    name=_unquote(body["name"]),
+                    address=(
+                        f"module.{module}{_counted(body)}."
+                        f"google_project.project{resource_index}"
+                    ),
+                    count=None if count is None else str(count),
+                )
+            )
+        return tuple(projects)
 
     def authoritative_bindings(self):
         """Returns the principals Stage 0 keeps on each authoritative role.
@@ -322,6 +465,37 @@ class Repo:
     def authoritative_org_roles(self):
         """Returns organization roles that Stage 0 manages authoritatively."""
         return sorted(self.authoritative_bindings())
+
+    def auto_tfvars_keys(self, stage):
+        """Returns the variables a stage receives from `*.auto.tfvars.json`.
+
+        Terraform loads `*.auto.tfvars.json` files after `terraform.tfvars`,
+        so these keys override anything the rendered tfvars sets. They are
+        the keys of the Stage 0 locals that `outputs-files.tf` writes.
+
+        Args:
+            stage: Stage directory name, such as `1-resman`.
+
+        Returns:
+            A frozenset of variable names, empty for Stage 0.
+
+        Raises:
+            RepoError: If the stage is unknown or a local is not a map.
+        """
+        if stage not in _AUTO_TFVARS_LOCALS:
+            raise RepoError(f"Unknown stage {stage}")
+        local_values = {}
+        for block in _load_hcl(self.bootstrap_dir / "outputs.tf").get(
+            "locals", []
+        ):
+            local_values.update(block)
+        keys = set()
+        for name in _AUTO_TFVARS_LOCALS[stage]:
+            value = local_values.get(name)
+            if not isinstance(value, dict):
+                raise RepoError(f"Cannot read local.{name} in outputs.tf")
+            keys.update(_unquote(key) for key in value)
+        return frozenset(keys)
 
     def min_terraform_version(self):
         """Returns the highest Terraform `required_version` floor of modules.
