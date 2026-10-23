@@ -215,7 +215,9 @@ resource "google_assured_workloads_workload" "primary" {
   depends_on                      = [module.organization-logging]
   lifecycle {
     create_before_destroy = true
-    ignore_changes        = [billing_account]
+    # The API never returns these input-only fields, so an imported workload
+    # would otherwise plan a replacement.
+    ignore_changes = [billing_account, resource_settings]
   }
 }
 

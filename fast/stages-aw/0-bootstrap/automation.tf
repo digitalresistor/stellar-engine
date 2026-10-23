@@ -26,6 +26,7 @@ module "automation-project" {
   billing_account         = var.billing_account.id
   name                    = "iac-core-0"
   default_service_account = "deprivilege"
+  deletion_policy         = var.project_deletion_policies.automation
   lien_reason             = "Protected by default as a core project."
   parent = coalesce(
     var.project_parent_ids.automation, module.branch-common-services-folder.folder.name

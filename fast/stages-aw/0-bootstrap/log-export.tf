@@ -40,6 +40,7 @@ module "log-export-project" {
   source                  = "../../../modules/project"
   name                    = "audit-logs-0"
   default_service_account = "deprivilege"
+  deletion_policy         = var.project_deletion_policies.logging
   lien_reason             = "Protected by default as a core project."
   parent = coalesce(
     var.project_parent_ids.logging, module.branch-common-services-folder.folder.name

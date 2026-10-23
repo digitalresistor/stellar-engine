@@ -45,6 +45,7 @@ module "billing-export-project" {
   billing_account         = var.billing_account.id
   name                    = "billing-exp-0"
   default_service_account = "deprivilege"
+  deletion_policy         = var.project_deletion_policies.billing
   parent = coalesce(
     var.project_parent_ids.billing, module.branch-common-services-folder.folder.name
   )
