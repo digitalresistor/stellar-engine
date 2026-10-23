@@ -296,6 +296,16 @@ class LiveCloudApi:
         return api.BillingAccount(account_id, account.open_)
 
     @_translated
+    def list_billing_accounts(self):
+        """See `CloudApi.list_billing_accounts`."""
+        return [
+            api.BillingAccount(
+                account.name.removeprefix("billingAccounts/"), account.open_
+            )
+            for account in self._billing.list_billing_accounts()
+        ]
+
+    @_translated
     def granted_billing_permissions(self, account_id, permissions):
         """See `CloudApi.granted_billing_permissions`."""
         client = self._billing
