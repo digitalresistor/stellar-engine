@@ -16,6 +16,8 @@
 
 import dataclasses
 import pathlib
+import shutil
+import stat
 
 import pytest
 
@@ -31,6 +33,28 @@ CUSTOMER_ID = "C01234567"
 BILLING = "000000-AAAAAA-BBBBBB"
 PROJECT = "example-bootstrap"
 USER = "deployer@example.com"
+# Addresses of the Stage 0 project resources that import blocks adopt.
+AUTOMATION_ADDRESS = "module.automation-project.google_project.project[0]"
+LOG_EXPORT_ADDRESS = "module.log-export-project.google_project.project[0]"
+BILLING_EXPORT_ADDRESS = (
+    "module.billing-export-project[0].google_project.project[0]"
+)
+
+
+def mode(path):
+    """Returns the permission bits of a file or directory."""
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skips the tests marked `terraform` when the binary is missing."""
+    del config  # Unused.
+    if shutil.which("terraform") is not None:
+        return
+    skip = pytest.mark.skip(reason="terraform is not installed")
+    for item in items:
+        if item.get_closest_marker("terraform") is not None:
+            item.add_marker(skip)
 
 
 @dataclasses.dataclass

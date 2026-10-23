@@ -23,17 +23,17 @@ accounts.
 import copy
 import io
 import json
-import os
 import pathlib
-import tempfile
 from typing import Any
 
-import dotenv
 import pydantic
 from ruamel import yaml
 from ruamel.yaml import error as yaml_error
 from ruamel.yaml import tokens as yaml_tokens
 
+from stellar_engine import fsutil
+from stellar_engine import naming
+from stellar_engine import paths
 from stellar_engine.config import derive
 from stellar_engine.config import models
 from stellar_engine.config import validate
@@ -149,6 +149,22 @@ def parse(data: Any, source: str | None = None) -> models.Answers:
         raise AnswersError(f"{title}\n{format_errors(error)}") from error
 
 
+def error_fields(error: pydantic.ValidationError) -> list[tuple[str, str]]:
+    """Returns the dotted field and the message of each pydantic error.
+
+    Args:
+        error: The validation error of the answers model.
+
+    Returns:
+        `(field, message)` pairs; an error of the whole model names the
+        field `answers`.
+    """
+    return [
+        (".".join(str(part) for part in item["loc"]) or "answers", item["msg"])
+        for item in error.errors()
+    ]
+
+
 def format_errors(error: pydantic.ValidationError) -> str:
     """Formats pydantic errors as one `field: message` line each.
 
@@ -158,11 +174,9 @@ def format_errors(error: pydantic.ValidationError) -> str:
     Returns:
         The lines, joined with newlines.
     """
-    lines = []
-    for item in error.errors():
-        field = ".".join(str(part) for part in item["loc"]) or "answers"
-        lines.append(f"- {field}: {item['msg']}")
-    return "\n".join(lines)
+    return "\n".join(
+        f"- {field}: {message}" for field, message in error_fields(error)
+    )
 
 
 def load(path: pathlib.Path) -> models.Answers:
@@ -281,33 +295,14 @@ def _update(previous, data):
 
 def _atomic_write(path, text, mode):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    handle, temp = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temp, mode)
-        os.replace(temp, path)
-    except BaseException:
-        pathlib.Path(temp).unlink(missing_ok=True)
-        raise
-
-
-def _home_of(path):
-    # `<home>/envs/<prefix>/answers.yaml`; other locations have no home.
-    if path.parent.parent.name == "envs":
-        return path.parent.parent.parent
-    return None
+    fsutil.atomic_write(path, text, mode)
 
 
 def save(
     path: pathlib.Path,
     answers: models.Answers,
     *,
-    schema_path: pathlib.Path | None = None,
+    home: pathlib.Path | None = None,
     previous: yaml.CommentedMap | None = None,
 ) -> None:
     """Writes answers, keeping the comments of a previous load.
@@ -315,17 +310,16 @@ def save(
     Args:
         path: The `answers.yaml` path.
         answers: Validated answers.
-        schema_path: Where to write the JSON schema of the model, usually
-            `paths.Home.schema_path`. None skips it.
+        home: The home that holds the environment of the file. The answers
+            must not point into it, and the JSON schema of the model goes
+            to its `paths.Home.schema_path`. None skips both.
         previous: The map `load_data` returned for this file, whose
             comments and key order survive. None writes a fresh file.
 
     Raises:
-        AnswersError: If a value points into the home of an answers file
-            under `<home>/envs/<prefix>/`.
+        AnswersError: If a value points into the home.
     """
     path = pathlib.Path(path)
-    home = _home_of(path.absolute())
     if home is not None:
         found = validate.home_references(answers, home)
         if found:
@@ -342,10 +336,10 @@ def save(
     while lines and lines[0].strip() in (SCHEMA_COMMENT, ""):
         lines.pop(0)
     _atomic_write(path, f"{SCHEMA_COMMENT}\n{''.join(lines)}", 0o600)
-    if schema_path is not None:
+    if home is not None:
         schema = models.Answers.model_json_schema()
         _atomic_write(
-            pathlib.Path(schema_path),
+            paths.Home(pathlib.Path(home)).schema_path,
             json.dumps(schema, indent=2) + "\n",
             0o644,
         )
@@ -457,11 +451,8 @@ def from_config_env(path: pathlib.Path) -> dict:
     Raises:
         FileNotFoundError: If the file does not exist.
     """
-    found = inputs.load_config_env(path)
-    extra = {
-        key: (value or "").strip()
-        for key, value in dotenv.dotenv_values(path).items()
-    }
+    extra = inputs.read_config_env(path)
+    found = inputs.config_env_fields(extra)
     data = {}
     if "prefix" in found:
         data["prefix"] = found["prefix"]
@@ -495,7 +486,7 @@ def from_config_env(path: pathlib.Path) -> dict:
     deployer = extra.get(_DEPLOYER_KEY)
     # deploy.sh runs setIAM for the deployer, which may be a service
     # account; bootstrap_user must be a human user.
-    if deployer and not deployer.endswith(".gserviceaccount.com"):
+    if deployer and not deployer.endswith(naming.SERVICE_ACCOUNT_SUFFIX):
         data["bootstrap_user"] = deployer
     tenant = extra.get(_TENANT_KEY)
     if tenant:

@@ -24,6 +24,8 @@ import re
 
 from packaging import version
 
+from stellar_engine import naming
+from stellar_engine import paths
 from stellar_engine import repo as repo_lib
 from stellar_engine import tools as tools_lib
 from stellar_engine.gcp import api
@@ -56,9 +58,6 @@ IMPERSONATION_ENV_VARS = (
     "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT",
     "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
 )
-_SCHEME_RE = re.compile(r"^[a-zA-Z]+:")
-_SA_EMAIL_SUFFIX = ".gserviceaccount.com"
-_PREFIX_RE = re.compile(r"^[a-z](?:[a-z0-9-]*[a-z0-9])?$")
 _REGION_RE = re.compile(r"^us-[a-z]+[0-9]+$")
 _MAX_LISTED = 10
 
@@ -314,7 +313,7 @@ def _bootstrap_user_result(ctx):
         "title": "Bootstrap user",
         "doc": DDG_STAGE0,
     }
-    if configured and configured.endswith(_SA_EMAIL_SUFFIX):
+    if configured and configured.endswith(naming.SERVICE_ACCOUNT_SUFFIX):
         return CheckResult(
             status=Status.FAIL,
             detail=(
@@ -792,7 +791,7 @@ def _group_members(ctx):
     """
     names = {**ctx.repo.default_groups(), **ctx.inputs.groups}
     return {
-        key: value if _SCHEME_RE.match(value) else f"group:{value}@{ctx.domain}"
+        key: naming.group_principal(value, ctx.domain)
         for key, value in names.items()
     }
 
@@ -1087,7 +1086,7 @@ def check_naming(ctx):
         )
         return results
     limit = ctx.repo.prefix_max_length()
-    valid = bool(_PREFIX_RE.match(prefix)) and len(prefix) <= limit
+    valid = bool(paths.PREFIX_RE.match(prefix)) and len(prefix) <= limit
     results.append(
         CheckResult(
             "naming.prefix",
@@ -1098,8 +1097,8 @@ def check_naming(ctx):
             if valid
             else (
                 f"{prefix} must start with a lowercase letter, use only "
-                f"lowercase letters, digits and hyphens, and be at most "
-                f"{limit} characters."
+                f"lowercase letters and digits, and be at most {limit} "
+                "characters."
             ),
             doc=DDG_PREREQUISITES,
         )
@@ -1111,15 +1110,15 @@ def check_naming(ctx):
     imported = sorted(set(ctx.inputs.imported_project_ids))
     # Stage 0 skips the billing export project for some billing answers, so
     # a holder of that ID is no collision then.
+    created = ctx.repo.created_stage0_projects(
+        no_iam=ctx.inputs.billing_no_iam,
+        is_org_level=ctx.inputs.billing_is_org_level,
+    )
     project_ids = [
         pid
-        for project in ctx.repo.stage0_projects()
-        if repo_lib.stage0_project_created(
-            project,
-            no_iam=ctx.inputs.billing_no_iam,
-            is_org_level=ctx.inputs.billing_is_org_level,
-        )
-        and (pid := f"{prefix}-prod-{project.name}") not in imported
+        for project in created
+        if (pid := naming.stage0_project_id(prefix, project.name))
+        not in imported
     ]
     results.extend(_project_results(ctx, project_ids))
     tenant_ids = [
@@ -1130,8 +1129,7 @@ def check_naming(ctx):
     if imported:
         results.append(_imported_result(ctx, imported))
     buckets = [
-        f"{prefix}-prod-iac-core-{name}-0"
-        for name in ("bootstrap", "outputs", "resman")
+        naming.state_bucket(prefix, name) for name in naming.STATE_BUCKET_NAMES
     ]
     results.append(
         _guarded(
@@ -1147,7 +1145,7 @@ def check_naming(ctx):
         )
     )
     if ctx.org is not None:
-        folder = f"StellarEngine-{prefix}"
+        folder = naming.workload_folder_name(prefix)
         results.append(
             _guarded(
                 "naming.folder",
@@ -1173,10 +1171,8 @@ def _holder_member(ctx, holder, groups):
         case repo_lib.HolderKind.GROUP:
             return groups.get(holder.key)
         case repo_lib.HolderKind.SERVICE_ACCOUNT if prefix:
-            return (
-                f"serviceAccount:{prefix}-prod-{holder.key}@"
-                f"{prefix}-prod-iac-core-0.iam.gserviceaccount.com"
-            )
+            email = naming.automation_sa_email(prefix, holder.key)
+            return f"serviceAccount:{email}"
         case repo_lib.HolderKind.BOOTSTRAP_USER if bootstrap_user(ctx):
             return f"user:{bootstrap_user(ctx)}"
         case repo_lib.HolderKind.DOMAIN if ctx.domain:

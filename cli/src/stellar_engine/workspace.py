@@ -60,8 +60,8 @@ BOOTSTRAP_PROVIDERS = "0-bootstrap-providers.tf"
 # Files under `outputs_location` that each stage links, mirroring
 # `fast/stage-links.sh`; tests/test_workspace.py checks the two agree.
 OUTPUT_LINKS: dict[str, tuple[str, ...]] = {
-    "0-bootstrap": (),
-    "1-resman": (
+    paths.BOOTSTRAP: (),
+    paths.RESMAN: (
         "providers/1-resman-providers.tf",
         "tfvars/0-globals.auto.tfvars.json",
         "tfvars/0-bootstrap.auto.tfvars.json",
@@ -149,10 +149,10 @@ def _is_engine_stage_link(target, stage, fast_config):
     if target == fast_config or target.is_relative_to(fast_config):
         return False
     parent = target.parent
+    depth = len(paths.STAGES_DIR.parts)
     return (
         parent.name == stage
-        and parent.parent.name == "stages-aw"
-        and parent.parent.parent.name == "fast"
+        and parent.parent.parts[-depth:] == paths.STAGES_DIR.parts
     )
 
 
@@ -232,7 +232,7 @@ def sync(
     """
     stage = paths.resolve_stage(stage)
     engine_root = pathlib.Path(engine_root).resolve()
-    stage_dir = engine_root / "fast" / "stages-aw" / stage
+    stage_dir = paths.stage_dir(engine_root, stage)
     if not stage_dir.is_dir():
         raise WorkspaceError(f"The engine has no stage directory {stage_dir}")
     workspace = env.workspace(stage)
@@ -243,7 +243,7 @@ def sync(
     _sync_engine_links(
         workspace, stage_dir, pathlib.Path(env.fast_config), report
     )
-    if stage == "0-bootstrap":
+    if stage == paths.BOOTSTRAP:
         _sync_bootstrap_providers(workspace, stage_dir, report)
     _sync_output_links(workspace, env.fast_config, OUTPUT_LINKS[stage], report)
     return report

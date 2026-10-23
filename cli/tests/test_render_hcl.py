@@ -14,23 +14,19 @@
 
 """Tests for the HCL emitter."""
 
-import shutil
 import subprocess
 
 import hcl2
 import pytest
 
 import conftest
+from stellar_engine import paths
 from stellar_engine.render import hcl
 from stellar_engine.render import sample
 
-needs_terraform = pytest.mark.skipif(
-    shutil.which("terraform") is None, reason="terraform is not installed"
-)
-
 SAMPLES = [
-    conftest.REPO_ROOT / "fast/stages-aw" / stage / "terraform.tfvars.sample"
-    for stage in ("0-bootstrap", "1-resman")
+    paths.stage_dir(conftest.REPO_ROOT, stage) / "terraform.tfvars.sample"
+    for stage in paths.STAGES
 ]
 
 CASES = {
@@ -248,7 +244,6 @@ def _fmt_check(text, tmp_path):
 
 
 @pytest.mark.terraform
-@needs_terraform
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_output_is_terraform_fmt_canonical(case, tmp_path):
     text = hcl.dumps(
@@ -261,7 +256,6 @@ def test_output_is_terraform_fmt_canonical(case, tmp_path):
 
 
 @pytest.mark.terraform
-@needs_terraform
 @pytest.mark.parametrize("path", SAMPLES, ids=lambda path: path.parent.name)
 def test_samples_reemit_canonical(path, tmp_path):
     parsed = sample.load(path)

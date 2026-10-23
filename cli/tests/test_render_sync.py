@@ -21,16 +21,15 @@ variable, a validation block or a sample fails here first.
 
 import json
 import re
-import shutil
-import subprocess
 
 import hcl2
 import pytest
 
 import conftest
-import render_fixtures
+import helpers
 from stellar_engine import paths
 from stellar_engine import repo as repo_lib
+from stellar_engine import workspace
 from stellar_engine.config import models
 from stellar_engine.config import validate
 from stellar_engine.render import imports
@@ -38,12 +37,8 @@ from stellar_engine.render import sample as sample_lib
 from stellar_engine.render import stages
 
 
-def _stage_dir(repo, stage):
-    return repo.root / "fast" / "stages-aw" / stage
-
-
 def _declared(repo, stage):
-    path = _stage_dir(repo, stage) / "variables.tf"
+    path = paths.stage_dir(repo.root, stage) / "variables.tf"
     parsed = hcl2.loads(path.read_text(encoding="utf-8"))
     return {
         json.loads(name) if name.startswith('"') else name
@@ -52,27 +47,22 @@ def _declared(repo, stage):
     }
 
 
-def _rendered(repo, name, stage):
-    answers = render_fixtures.load_answers(name)
-    return stages.build(
-        stage, answers, repo, render_fixtures.env_paths(answers)
-    )
-
-
 @pytest.mark.parametrize("stage", paths.STAGES)
-@pytest.mark.parametrize("name", render_fixtures.ALL_FIXTURES)
+@pytest.mark.parametrize("name", helpers.ALL_FIXTURES)
 def test_written_keys_are_declared_variables(name, stage, repo):
-    assert set(_rendered(repo, name, stage).values) <= _declared(repo, stage)
+    assert set(helpers.render(repo, name, stage).values) <= _declared(
+        repo, stage
+    )
 
 
 def test_variable_names_match_hcl(repo):
     for stage in paths.STAGES:
-        assert stages.variable_names(repo, stage) == _declared(repo, stage)
+        assert repo.stage_variable_names(stage) == _declared(repo, stage)
 
 
-@pytest.mark.parametrize("name", render_fixtures.ALL_FIXTURES)
+@pytest.mark.parametrize("name", helpers.ALL_FIXTURES)
 def test_auto_keys_are_never_written(name, repo):
-    written = set(_rendered(repo, name, "1-resman").values)
+    written = set(helpers.render(repo, name, "1-resman").values)
     assert not written & repo.auto_tfvars_keys("1-resman")
 
 
@@ -80,7 +70,7 @@ def test_auto_keys_match_stage_outputs(repo):
     # The stage 1 harness fixtures model the files Stage 0 writes, so their
     # keys must be exactly the keys the renderer treats as auto-provided.
     fixture_keys = set()
-    for path in render_fixtures.STAGE_OUTPUTS_DIR.glob("*.auto.tfvars.json"):
+    for path in helpers.STAGE_OUTPUTS_DIR.glob("*.auto.tfvars.json"):
         fixture_keys |= set(json.loads(path.read_text(encoding="utf-8")))
     assert fixture_keys == repo.auto_tfvars_keys("1-resman")
 
@@ -108,13 +98,11 @@ def test_auto_keys_bootstrap_and_unknown_stage(repo):
     sorted(repo_lib.Repo(conftest.REPO_ROOT).auto_tfvars_keys("1-resman")),
 )
 def test_override_of_any_auto_key_is_rejected(key, repo):
-    answers = render_fixtures.load_answers(
+    answers = helpers.load_fixture(
         "fedramp_high", overrides={"1-resman": {key: 1}}
     )
     with pytest.raises(stages.RenderError, match=key):
-        stages.build(
-            "1-resman", answers, repo, render_fixtures.env_paths(answers)
-        )
+        stages.build("1-resman", answers, repo, helpers.env_paths(answers))
 
 
 @pytest.mark.parametrize("stage", paths.STAGES)
@@ -126,8 +114,8 @@ def test_every_sample_placeholder_is_replaced(stage, repo):
         if stages.PLACEHOLDER_RE.search(json.dumps(value))
     }
     assert with_placeholders, "the sample has no placeholders to check"
-    for name in render_fixtures.ALL_FIXTURES:
-        rendered = _rendered(repo, name, stage)
+    for name in helpers.ALL_FIXTURES:
+        rendered = helpers.render(repo, name, stage)
         assert not stages.PLACEHOLDER_RE.search(rendered.text)
         auto = repo.auto_tfvars_keys(stage)
         # Every sample key with a placeholder is either rendered from the
@@ -137,26 +125,33 @@ def test_every_sample_placeholder_is_replaced(stage, repo):
 
 def test_prefix_limit_matches_validation_blocks(repo):
     limit = repo.prefix_max_length()
-    stage1 = (_stage_dir(repo, "1-resman") / "variables.tf").read_text(
-        encoding="utf-8"
-    )
+    stage1 = (
+        paths.stage_dir(repo.root, paths.RESMAN) / "variables.tf"
+    ).read_text(encoding="utf-8")
     match = re.search(r"length\(var\.prefix\), 0\) < (\d+)", stage1)
     assert match is not None
     assert int(match.group(1)) - 1 == limit
-    assert re.fullmatch(models.PREFIX_PATTERN, "a" * limit)
-    assert not re.fullmatch(models.PREFIX_PATTERN, "a" * (limit + 1))
+    for prefix, ok in (("a" * limit, True), ("a" * (limit + 1), False)):
+        assert re.fullmatch(models.PREFIX_PATTERN, prefix)
+        answers = helpers.load_fixture("fedramp_high", prefix=prefix)
+        found = [
+            p
+            for p in validate.problems(answers, repo)
+            if p.startswith("prefix")
+        ]
+        assert (found == []) is ok
 
 
 def test_tenant_key_limit_matches_validation_block(repo):
-    text = (_stage_dir(repo, "1-resman") / "variables.tf").read_text(
-        encoding="utf-8"
-    )
+    text = (
+        paths.stage_dir(repo.root, paths.RESMAN) / "variables.tf"
+    ).read_text(encoding="utf-8")
     match = re.search(r"length\(k\) < (\d+)", text)
     assert match is not None
     limit = int(match.group(1)) - 1
     assert repo.tenant_key_max_length() == limit
     for key, ok in (("a" * limit, True), ("a" * (limit + 1), False)):
-        answers = render_fixtures.load_answers(
+        answers = helpers.load_fixture(
             "fedramp_high",
             prefix="t",
             resman={
@@ -191,35 +186,35 @@ def test_billing_export_count_matches_import_warning(repo):
         r'var\.billing_account\.is_org_level \? "org"',
         text,
     )
-    answers = render_fixtures.load_answers(
+    answers = helpers.load_fixture(
         "lab",
         imports={
             "0-bootstrap": {
-                "module.billing-export-project[0].google_project.project[0]": (
-                    "lab1-prod-billing-exp-0"
-                )
+                conftest.BILLING_EXPORT_ADDRESS: ("lab1-prod-billing-exp-0")
             }
         },
     )
-    assert imports.warnings(answers, "0-bootstrap")
+    assert imports.warnings(answers, "0-bootstrap", repo)
 
 
 @pytest.mark.terraform
-@pytest.mark.skipif(
-    shutil.which("terraform") is None, reason="terraform is missing"
-)
 def test_import_file_is_fmt_canonical():
-    answers = render_fixtures.load_answers("lab")
+    answers = helpers.load_fixture("lab")
     text = imports.dumps(
         answers.imports["0-bootstrap"], imports.header("0", answers.prefix)
     )
-    result = subprocess.run(
-        ["terraform", "fmt", "-"],
-        input=text,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=60,
-    )
+    result = helpers.terraform_fmt(text)
     assert result.returncode == 0, result.stderr
     assert result.stdout == text
+
+
+def test_per_stage_tables_cover_every_stage():
+    # A new stage must get an entry in every table keyed by stage.
+    tables = (
+        workspace.OUTPUT_LINKS,
+        repo_lib._AUTO_TFVARS_LOCALS,
+        validate._CLI_OWNED_KEYS,
+        stages._BUILDERS,
+    )
+    for table in tables:
+        assert set(table) == set(paths.STAGES)

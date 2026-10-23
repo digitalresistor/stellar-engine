@@ -120,9 +120,6 @@ def test_missing_config_env(tmp_path):
         inputs.load_config_env(tmp_path / "missing.env")
 
 
-AUTOMATION_ADDRESS = "module.automation-project.google_project.project[0]"
-
-
 @pytest.fixture
 def answers():
     """Returns placeholder answers with one tenant and two imports."""
@@ -146,7 +143,7 @@ def answers():
             },
             "imports": {
                 "0-bootstrap": {
-                    AUTOMATION_ADDRESS: "ans-prod-iac-core-0",
+                    conftest.AUTOMATION_ADDRESS: "ans-prod-iac-core-0",
                     "google_folder.unrelated": "folders/1",
                 },
             },

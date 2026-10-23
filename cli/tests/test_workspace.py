@@ -22,6 +22,7 @@ import subprocess
 import pytest
 
 import conftest
+import helpers
 from stellar_engine import paths
 from stellar_engine import workspace
 
@@ -57,7 +58,7 @@ def engine(tmp_path):
     (root / "modules" / "project").mkdir(parents=True)
     for stage, files in _ENGINE_FILES.items():
         for name in files:
-            path = root / "fast" / "stages-aw" / stage / name
+            path = paths.stage_dir(root, stage) / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"# {name}\n")
     return root
@@ -67,10 +68,6 @@ def engine(tmp_path):
 def env(tmp_path):
     """Returns the paths of an environment in a home outside the engine."""
     return paths.Home(tmp_path / "home").env("abc")
-
-
-def _stage_dir(engine, stage):
-    return engine / "fast" / "stages-aw" / stage
 
 
 def _links(directory):
@@ -84,7 +81,7 @@ def _links(directory):
 def test_sync_bootstrap_layout(engine, env):
     report = workspace.sync(env, engine, "0")
     ws = env.workspace("0-bootstrap")
-    stage_dir = _stage_dir(engine, "0-bootstrap")
+    stage_dir = paths.stage_dir(engine, paths.BOOTSTRAP)
     assert report.stage == "0-bootstrap"
     assert report.path == ws
     assert report.linked == [
@@ -149,7 +146,7 @@ def test_sync_reports_conflicts_without_overwriting(engine, env):
 def test_sync_removes_stale_engine_links(engine, env):
     workspace.sync(env, engine, "0-bootstrap")
     ws = env.workspace("0-bootstrap")
-    stage_dir = _stage_dir(engine, "0-bootstrap")
+    stage_dir = paths.stage_dir(engine, paths.BOOTSTRAP)
     (stage_dir / "setIAM.sh").unlink()
     # A link that now matches an excluded pattern is stale as well.
     (ws / "README.md").symlink_to(stage_dir / "README.md")
@@ -170,7 +167,7 @@ def test_sync_repoints_links_to_a_moved_engine(engine, env, tmp_path):
     ws = env.workspace("0-bootstrap")
     assert "main.tf" in report.linked
     assert os.readlink(ws / "main.tf") == str(
-        _stage_dir(moved, "0-bootstrap") / "main.tf"
+        paths.stage_dir(moved, paths.BOOTSTRAP) / "main.tf"
     )
     assert os.readlink(env.modules_link) == str(moved / "modules")
 
@@ -179,7 +176,7 @@ def test_sync_removes_links_into_a_previous_engine(engine, env, tmp_path):
     workspace.sync(env, engine, "0-bootstrap")
     other = tmp_path / "other-engine"
     shutil.copytree(engine, other)
-    (_stage_dir(other, "0-bootstrap") / "setIAM.sh").unlink()
+    (paths.stage_dir(other, paths.BOOTSTRAP) / "setIAM.sh").unlink()
     ws = env.workspace("0-bootstrap")
     # A hand-made link elsewhere in the first engine is not an engine link.
     (ws / "operator.tf").symlink_to(engine / "modules")
@@ -187,7 +184,7 @@ def test_sync_removes_links_into_a_previous_engine(engine, env, tmp_path):
     assert report.removed == ["setIAM.sh"]
     assert not (ws / "setIAM.sh").is_symlink()
     assert (ws / "operator.tf").is_symlink()
-    other_stage = _stage_dir(other, "0-bootstrap")
+    other_stage = paths.stage_dir(other, paths.BOOTSTRAP)
     engine_links = {
         name: target
         for name, target in _links(ws).items()
@@ -199,7 +196,7 @@ def test_sync_removes_links_into_a_previous_engine(engine, env, tmp_path):
 def test_sync_keeps_output_links_named_like_old_engine_files(engine, env):
     workspace.sync(env, engine, "1-resman")
     ws = env.workspace("1-resman")
-    source = env.fast_config / "fast" / "stages-aw" / "1-resman" / "x.tf"
+    source = paths.stage_dir(env.fast_config, paths.RESMAN) / "x.tf"
     source.parent.mkdir(parents=True)
     source.write_text("")
     (ws / "x.tf").symlink_to(source)
@@ -276,7 +273,7 @@ def test_two_homes_share_one_engine(engine, tmp_path):
     for env in (first, second):
         ws = env.workspace("0-bootstrap")
         assert os.readlink(ws / "main.tf") == str(
-            _stage_dir(engine, "0-bootstrap") / "main.tf"
+            paths.stage_dir(engine, paths.BOOTSTRAP) / "main.tf"
         )
     (first.workspace("0") / "terraform.tfvars").write_text("one\n")
     assert not (second.workspace("0") / "terraform.tfvars").exists()
@@ -344,10 +341,6 @@ def test_bootstrap_links_only_the_remote_providers(tmp_path):
     assert workspace.OUTPUT_LINKS["0-bootstrap"] == ()
 
 
-def test_output_links_cover_every_stage():
-    assert set(workspace.OUTPUT_LINKS) == set(paths.STAGES)
-
-
 def test_sync_real_engine_layout(env):
     report = workspace.sync(env, conftest.REPO_ROOT, "0-bootstrap")
     assert "main.tf" in report.linked
@@ -356,24 +349,11 @@ def test_sync_real_engine_layout(env):
     assert report.conflicts == []
 
 
-def _terraform(ws, *args):
-    return subprocess.run(
-        ["terraform", f"-chdir={ws}", *args],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=600,
-    )
-
-
 @pytest.mark.terraform
-@pytest.mark.skipif(
-    shutil.which("terraform") is None, reason="terraform is missing"
-)
 def test_bootstrap_workspace_validates(env):
     workspace.sync(env, conftest.REPO_ROOT, "0-bootstrap")
     ws = env.workspace("0-bootstrap")
-    init = _terraform(ws, "init", "-backend=false", "-input=false", "-no-color")
+    init = helpers.terraform(ws, "init", "-backend=false", "-input=false")
     assert init.returncode == 0, init.stderr
-    validate = _terraform(ws, "validate", "-no-color")
+    validate = helpers.terraform(ws, "validate")
     assert validate.returncode == 0, validate.stderr

@@ -14,7 +14,6 @@
 
 """Tests for the local tool queries."""
 
-import shutil
 import subprocess
 
 import pytest
@@ -51,9 +50,6 @@ def test_terraform_fmt_rejected_text(monkeypatch):
 
 
 @pytest.mark.terraform
-@pytest.mark.skipif(
-    shutil.which("terraform") is None, reason="terraform is not installed"
-)
 def test_terraform_fmt_real_binary():
     system = tools.SystemTools()
     assert system.terraform_fmt("a = 1\nbbb = 2\n") == "a   = 1\nbbb = 2\n"

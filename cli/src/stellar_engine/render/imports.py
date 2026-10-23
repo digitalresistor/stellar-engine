@@ -26,26 +26,21 @@ records in `existing_org_policies`, replacing `0-bootstrap/import.sh`.
 """
 
 from collections.abc import Mapping, Sequence
-import os
 import pathlib
-import tempfile
 
+from stellar_engine import fsutil
 from stellar_engine import paths
+from stellar_engine import repo as repo_lib
 from stellar_engine.config import models
 from stellar_engine.config import validate as validate_lib
 from stellar_engine.render import hcl
+from stellar_engine.render import writer
 
 FILENAME_TEMPLATE = "{stage}-imports.tf"
-WARNING_PREFIX = "Warning: "
 # Marks files this module wrote, so it never replaces or removes an
 # operator's own file of the same name.
 _MARKER = "# stellar render writes this file from envs/"
 _FILE_MODE = 0o644
-# `module "billing-export-project"` in `0-bootstrap/billing.tf` has
-# `count = 0` unless `local.billing_mode` is "org", which needs `no_iam`
-# false and `is_org_level` true.
-_BILLING_EXPORT_MODULE = "module.billing-export-project[0]."
-_BOOTSTRAP_STAGE = paths.STAGES[0]
 # The stage locals that the import file adds; the prefix keeps them apart
 # from the locals of the stage code.
 _POLICIES_LOCAL = "stellar_existing_org_policies"
@@ -74,25 +69,9 @@ def filename(stage: str) -> str:
     return FILENAME_TEMPLATE.format(stage=paths.resolve_stage(stage))
 
 
-def problems(answers: models.Answers, stage: str) -> list[str]:
-    """Returns the errors that stop the import blocks of a stage.
-
-    Args:
-        answers: The environment answers.
-        stage: Stage name or alias.
-
-    Returns:
-        One readable sentence per invalid address.
-    """
-    stage = paths.resolve_stage(stage)
-    return [
-        f"imports.{stage}: {problem}"
-        for address in answers.imports.get(stage, {})
-        for problem in validate_lib.import_address_problems(address)
-    ]
-
-
-def warnings(answers: models.Answers, stage: str) -> list[str]:
+def warnings(
+    answers: models.Answers, stage: str, repo: repo_lib.Repo
+) -> list[str]:
     """Returns non-fatal findings about the import blocks of a stage.
 
     An import into a resource that the configuration does not create fails
@@ -101,50 +80,70 @@ def warnings(answers: models.Answers, stage: str) -> list[str]:
     Args:
         answers: The environment answers.
         stage: Stage name or alias.
+        repo: The engine checkout whose Stage 0 projects are checked.
 
     Returns:
-        Readable sentences, each starting with `WARNING_PREFIX`.
+        Readable sentences, one per import into a project that Stage 0
+        skips for the billing answers.
     """
     stage = paths.resolve_stage(stage)
-    billing = answers.billing
-    if stage != "0-bootstrap" or (not billing.no_iam and billing.is_org_level):
+    if stage != paths.BOOTSTRAP:
         return []
+    created = repo.created_stage0_projects(
+        no_iam=answers.billing.no_iam,
+        is_org_level=answers.billing.is_org_level,
+    )
+    # Only the billing export project depends on the billing answers; see
+    # `repo.stage0_project_created`.
+    skipped = [
+        _module_prefix(project)
+        for project in repo.stage0_projects()
+        if project not in created
+    ]
     return [
-        f"{WARNING_PREFIX}imports.{stage}: {address} targets the billing "
-        "export project, which Stage 0 only creates when billing.no_iam is "
-        "false and billing.is_org_level is true, so the import would fail."
+        f"imports.{stage}: {address} targets the billing export project, "
+        f"which Stage 0 only creates when {repo_lib.BILLING_EXPORT_CONDITION}"
+        ", so the import would fail."
         for address in answers.imports.get(stage, {})
-        if address.startswith(_BILLING_EXPORT_MODULE)
+        if address.startswith(tuple(skipped))
     ]
 
 
-def validate(answers: models.Answers, stage: str) -> list[str]:
-    """Returns the problems followed by the warnings of a stage's imports.
+def _module_prefix(project):
+    """Returns the address prefix of every resource in a project module.
 
-    Warnings start with `WARNING_PREFIX`; use `problems` and `warnings` to
-    tell them apart programmatically.
-
-    Args:
-        answers: The environment answers.
-        stage: Stage name or alias.
+    For example `module.billing-export-project[0].`.
     """
-    return problems(answers, stage) + warnings(answers, stage)
+    module, _, _ = project.address.partition(".google_project.")
+    return f"{module}."
 
 
-def header(stage: str, prefix: str, *, org_policies: bool = False) -> list[str]:
+def header(
+    stage: str,
+    prefix: str,
+    *,
+    imports: bool = True,
+    org_policies: bool = False,
+) -> list[str]:
     """Returns the generated header of a stage's import file.
 
     Args:
         stage: Stage name or alias.
         prefix: Environment prefix.
-        org_policies: Whether the file also imports `existing_org_policies`.
+        imports: Whether the file imports entries of `imports.<stage>`.
+        org_policies: Whether the file imports `existing_org_policies`.
     """
     stage = paths.resolve_stage(stage)
-    sources = f"imports.{stage}"
-    if org_policies:
-        sources += " and existing_org_policies"
+    sources = [
+        source
+        for source, wanted in (
+            (f"imports.{stage}", imports),
+            ("existing_org_policies", org_policies),
+        )
+        if wanted
+    ]
     return [
-        f"{_MARKER}{prefix}/answers.yaml {sources}.",
+        f"{_MARKER}{prefix}/answers.yaml {' and '.join(sources)}.",
         "# Edit answers.yaml and rerun stellar render; the next render "
         "replaces manual edits.",
     ]
@@ -250,12 +249,16 @@ def text(answers: models.Answers, stage: str) -> str:
         ImportBlockError: If an address is not a resource address.
     """
     stage = paths.resolve_stage(stage)
-    policies = (
-        answers.existing_org_policies if stage == _BOOTSTRAP_STAGE else []
-    )
+    entries = answers.imports.get(stage, {})
+    policies = answers.existing_org_policies if stage == paths.BOOTSTRAP else []
     return dumps(
-        answers.imports.get(stage, {}),
-        header(stage, answers.prefix, org_policies=bool(policies)),
+        entries,
+        header(
+            stage,
+            answers.prefix,
+            imports=bool(entries),
+            org_policies=bool(policies),
+        ),
         policies,
     )
 
@@ -267,21 +270,9 @@ def _is_generated(path: pathlib.Path) -> bool:
         return handle.readline().startswith(_MARKER)
 
 
-def _write_atomic(path: pathlib.Path, text: str) -> None:
-    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.chmod(temp, _FILE_MODE)
-        os.replace(temp, path)
-    except BaseException:
-        pathlib.Path(temp).unlink(missing_ok=True)
-        raise
-
-
 def write(
     workspace: pathlib.Path, stage: str, answers: models.Answers
-) -> pathlib.Path | None:
+) -> writer.Outcome | None:
     """Writes or removes the import file of a stage in its workspace.
 
     Every render replaces the file, so it always matches the answers.
@@ -295,7 +286,9 @@ def write(
         answers: The environment answers.
 
     Returns:
-        The written file, or None when the stage imports nothing.
+        What happened to the `filename(stage)` file in the workspace:
+        created, updated, unchanged or removed. None when the stage imports
+        nothing and no generated file was there to remove.
 
     Raises:
         ImportBlockError: If an address is invalid, or a file of the same
@@ -308,11 +301,17 @@ def write(
     if not content:
         if exists and _is_generated(target):
             target.unlink()
+            return writer.Outcome.REMOVED
         return None
     if exists and not _is_generated(target):
         raise ImportBlockError(
             f"stellar did not write {target}; move it away or delete it, "
             "then rerun stellar render."
         )
-    _write_atomic(target, content)
-    return target
+    previous = fsutil.read_text_or_none(target) if exists else None
+    fsutil.atomic_write(target, content, _FILE_MODE)
+    if previous is None:
+        return writer.Outcome.CREATED
+    if previous == content:
+        return writer.Outcome.UNCHANGED
+    return writer.Outcome.UPDATED

@@ -28,7 +28,8 @@ import enum
 import hashlib
 import os
 import pathlib
-import tempfile
+
+from stellar_engine import fsutil
 
 _FILE_MODE = 0o600
 _DIR_MODE = 0o700
@@ -36,12 +37,13 @@ _BACKUP_TIME_FORMAT = "%Y%m%dT%H%M%SZ"
 
 
 class Outcome(enum.StrEnum):
-    """What `write` did with the target file."""
+    """What `write`, or `imports.write`, did with the target file."""
 
     CREATED = "created"
     UPDATED = "updated"
     UNCHANGED = "unchanged"
     SKIPPED = "skipped"
+    REMOVED = "removed"
 
 
 class OverwriteRefusedError(Exception):
@@ -68,32 +70,6 @@ class WriteResult:
 
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def _read(path: pathlib.Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-
-
-def _write_atomic(path: pathlib.Path, data: bytes) -> None:
-    """Replaces `path` with `data` in one step, with mode 0600.
-
-    A temporary file in the same directory plus `os.replace` means a crash
-    never leaves a half-written tfvars file behind.
-    """
-    descriptor, temp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            os.fchmod(handle.fileno(), _FILE_MODE)
-            handle.write(data)
-        os.replace(temp_name, path)
-    except BaseException:
-        pathlib.Path(temp_name).unlink(missing_ok=True)
-        raise
 
 
 def _backup(
@@ -124,10 +100,10 @@ def _backup(
 
 
 def _store_hash(hash_file: pathlib.Path, digest: str) -> None:
-    if _read(hash_file) == f"{digest}\n":
+    if fsutil.read_text_or_none(hash_file) == f"{digest}\n":
         return
     hash_file.parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
-    _write_atomic(hash_file, f"{digest}\n".encode())
+    fsutil.atomic_write(hash_file, f"{digest}\n".encode(), _FILE_MODE)
 
 
 def diff(target: pathlib.Path, content: str) -> str:
@@ -140,7 +116,7 @@ def diff(target: pathlib.Path, content: str) -> str:
     Returns:
         The diff text, or an empty string when the contents are equal.
     """
-    current = _read(target) or ""
+    current = fsutil.read_text_or_none(target) or ""
     if current == content:
         return ""
     lines = difflib.unified_diff(
@@ -189,16 +165,16 @@ def write(
         current = target.read_bytes()
     except FileNotFoundError:
         changes = diff(target, content)
-        _write_atomic(target, data)
+        fsutil.atomic_write(target, data, _FILE_MODE)
         _store_hash(hash_file, digest)
         return WriteResult(Outcome.CREATED, target, None, changes)
     if current == data:
         _store_hash(hash_file, digest)
         return WriteResult(Outcome.UNCHANGED, target, None, "")
     changes = diff(target, content)
-    recorded = (_read(hash_file) or "").strip()
+    recorded = (fsutil.read_text_or_none(hash_file) or "").strip()
     if recorded and recorded == _digest(current):
-        _write_atomic(target, data)
+        fsutil.atomic_write(target, data, _FILE_MODE)
         _store_hash(hash_file, digest)
         return WriteResult(Outcome.UPDATED, target, None, changes)
     if not force:
@@ -211,6 +187,6 @@ def write(
         if not confirm(changes):
             return WriteResult(Outcome.SKIPPED, target, None, changes)
     backup = _backup(target, current, now)
-    _write_atomic(target, data)
+    fsutil.atomic_write(target, data, _FILE_MODE)
     _store_hash(hash_file, digest)
     return WriteResult(Outcome.UPDATED, target, backup, changes)

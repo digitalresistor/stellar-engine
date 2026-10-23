@@ -26,10 +26,14 @@ from typing import Annotated, Any, Literal
 import pydantic
 
 from stellar_engine import paths
+from stellar_engine import patterns
 
-# Same format as `PreflightInputs.bootstrap_user`.
-EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
-PREFIX_PATTERN = r"^[a-z][a-z0-9]{0,6}$"
+EMAIL_PATTERN = patterns.EMAIL
+# The length limit comes from the repository, so `validate` checks it.
+PREFIX_PATTERN = patterns.PREFIX
+# The Stage 0 prefix limit, only for the JSON schema that editors read; a
+# test keeps it equal to the repository limit that `validate` enforces.
+PREFIX_SCHEMA_MAX_LENGTH = 7
 TENANT_KEY_PATTERN = r"^[a-z][a-z0-9-]*$"
 # Stage 1 lowercases `<env>-<tenant>` into project and service account IDs,
 # so env keys may use capitals but only characters valid in those IDs.
@@ -56,7 +60,7 @@ class _Model(pydantic.BaseModel):
 class Organization(_Model):
     """The Google Cloud organization that Stage 0 deploys into."""
 
-    id: str = pydantic.Field(pattern=r"^[0-9]+$")
+    id: str = pydantic.Field(pattern=patterns.ORG_ID)
     domain: str = pydantic.Field(min_length=1)
     customer_id: str = pydantic.Field(pattern=r"^C[0-9a-zA-Z]+$")
 
@@ -74,9 +78,7 @@ class Billing(_Model):
             access before Stages 1 to 3.
     """
 
-    account_id: str = pydantic.Field(
-        pattern=r"^[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$"
-    )
+    account_id: str = pydantic.Field(pattern=patterns.BILLING_ACCOUNT)
     is_org_level: bool = True
     no_iam: bool = False
     external_grant: bool = False
@@ -99,7 +101,7 @@ class Compliance(_Model):
             not list for the regime, for when Google adds a region first.
     """
 
-    regime: str = pydantic.Field(pattern=r"^[A-Z0-9_]+$")
+    regime: str = pydantic.Field(pattern=patterns.REGIME)
     location: str | None = None
     allow_unlisted_region: bool = False
 
@@ -226,14 +228,15 @@ class Answers(_Model):
     """
 
     schema_version: Literal[1] = 1
-    prefix: str = pydantic.Field(pattern=PREFIX_PATTERN)
+    prefix: str = pydantic.Field(
+        pattern=PREFIX_PATTERN,
+        json_schema_extra={"maxLength": PREFIX_SCHEMA_MAX_LENGTH},
+    )
     engine: Engine | None = None
     organization: Organization
     billing: Billing
     billing_override: BillingOverride | None = None
-    bootstrap_project: str = pydantic.Field(
-        pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
-    )
+    bootstrap_project: str = pydantic.Field(pattern=patterns.PROJECT_ID)
     bootstrap_user: str | None = pydantic.Field(
         default=None, pattern=EMAIL_PATTERN
     )

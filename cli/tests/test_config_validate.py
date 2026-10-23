@@ -16,56 +16,58 @@
 
 import pytest
 
-import answer_fixtures
-import render_fixtures
+import conftest
+import helpers
 from stellar_engine import repo as repo_lib
 from stellar_engine.config import models
 from stellar_engine.config import validate
 
 
-def _answers(**overrides):
-    return models.Answers.model_validate(
-        answer_fixtures.answer_data(**overrides)
-    )
-
-
 def test_valid_answers_have_no_problems(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         groups={"gcp-devops": "platform"},
         resman={"tenants": {"ten1": {"descriptive_name": "Tenant"}}},
         imports={
             "0-bootstrap": {
-                "module.automation-project.google_project.project[0]": (
-                    "tst-prod-iac-core-0"
-                )
+                conftest.AUTOMATION_ADDRESS: ("tst-prod-iac-core-0")
             }
         },
     )
     assert validate.problems(answers, repo) == []
 
 
+def test_schema_prefix_limit_matches_repo(repo):
+    schema = models.Answers.model_json_schema()["properties"]["prefix"]
+    assert repo.prefix_max_length() == models.PREFIX_SCHEMA_MAX_LENGTH
+    assert schema["maxLength"] == repo.prefix_max_length()
+
+
 def test_prefix_longer_than_repo_limit(repo, monkeypatch):
     monkeypatch.setattr(repo_lib.Repo, "prefix_max_length", lambda self: 2)
-    problems = validate.problems(_answers(), repo)
+    problems = validate.problems(helpers.minimal_answers(), repo)
     assert problems == [
         "prefix tst is longer than the 2 characters Stage 0 allows."
     ]
 
 
 def test_unknown_regime(repo):
-    problems = validate.problems(_answers(compliance={"regime": "IL9"}), repo)
+    problems = validate.problems(
+        helpers.minimal_answers(compliance={"regime": "IL9"}), repo
+    )
     assert len(problems) == 1
     assert problems[0].startswith("compliance.regime IL9 is not one of")
 
 
 def test_unknown_group_key(repo):
-    problems = validate.problems(_answers(groups={"gcp-nope": "x"}), repo)
+    problems = validate.problems(
+        helpers.minimal_answers(groups={"gcp-nope": "x"}), repo
+    )
     assert len(problems) == 1
     assert problems[0].startswith("groups keys gcp-nope are not Stage 0")
 
 
 def test_region_must_suit_the_regime(repo):
-    answers = _answers(region="us-east5")
+    answers = helpers.minimal_answers(region="us-east5")
     problems = validate.problems(answers, repo)
     assert len(problems) == 1
     assert problems[0].startswith(
@@ -74,7 +76,7 @@ def test_region_must_suit_the_regime(repo):
 
 
 def test_unlisted_region_can_be_allowed(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         region="us-east5",
         compliance={"regime": "IL5", "allow_unlisted_region": True},
     )
@@ -82,12 +84,14 @@ def test_unlisted_region_can_be_allowed(repo):
 
 
 def test_regime_without_region_table_accepts_any_region(repo):
-    answers = _answers(region="europe-west1", compliance={"regime": "IL2"})
+    answers = helpers.minimal_answers(
+        region="europe-west1", compliance={"regime": "IL2"}
+    )
     assert validate.problems(answers, repo) == []
 
 
 def test_tenant_key_limit_comes_from_resman(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         resman={"tenants": {"abcdefg": {"descriptive_name": "Tenant"}}}
     )
     problems = validate.problems(answers, repo)
@@ -98,7 +102,7 @@ def test_tenant_key_limit_comes_from_resman(repo):
 
 
 def test_tenant_ids_over_30_characters(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         prefix="abcdefg",
         resman={
             "envs": {"Production": {}},
@@ -122,8 +126,8 @@ def test_tenant_ids_over_30_characters(repo):
     [
         "google_project.project",
         "google_project.project[0]",
-        "module.automation-project.google_project.project[0]",
-        "module.billing-export-project[0].google_project.project[0]",
+        conftest.AUTOMATION_ADDRESS,
+        conftest.BILLING_EXPORT_ADDRESS,
         'module.a["key"].module.b[1].google_x.y["a.b[0]"]',
         'module.a["with \\"quote\\""].google_x.y',
     ],
@@ -157,7 +161,9 @@ def test_invalid_import_addresses(address, message):
 
 
 def test_problems_include_import_addresses(repo):
-    answers = _answers(imports={"0-bootstrap": {"bad address": "x"}})
+    answers = helpers.minimal_answers(
+        imports={"0-bootstrap": {"bad address": "x"}}
+    )
     problems = validate.problems(answers, repo)
     assert len(problems) == 1
     assert problems[0].startswith("imports.0-bootstrap: Import address")
@@ -165,7 +171,7 @@ def test_problems_include_import_addresses(repo):
 
 def test_home_references(tmp_path):
     home = tmp_path / "home"
-    answers = _answers(
+    answers = helpers.minimal_answers(
         overrides={
             "0-bootstrap": {"outputs_location": str(home / "envs/tst")},
             "1-resman": {"other": str(tmp_path / "elsewhere")},
@@ -179,7 +185,7 @@ def test_home_references(tmp_path):
 
 def test_home_references_skip_the_recorded_engine(tmp_path):
     home = tmp_path / "home"
-    answers = _answers(
+    answers = helpers.minimal_answers(
         engine={"path": str(home / "engine")},
         overrides={"1-resman": {"other": str(home / "data")}},
     )
@@ -190,30 +196,37 @@ def test_home_references_skip_the_recorded_engine(tmp_path):
 
 def test_home_references_expand_tilde(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    answers = _answers(overrides={"1-resman": {"other": "~/home/engine"}})
+    answers = helpers.minimal_answers(
+        overrides={"1-resman": {"other": "~/home/engine"}}
+    )
     assert validate.home_references(answers, tmp_path / "home")
-    assert validate.home_references(_answers(), tmp_path / "home") == []
-
-
-_AUTOMATION = "module.automation-project.google_project.project[0]"
+    assert (
+        validate.home_references(helpers.minimal_answers(), tmp_path / "home")
+        == []
+    )
 
 
 def test_import_id_must_match_the_prefix(repo):
     # The prefix changes while the imports keep the old project IDs.
-    data = render_fixtures.answer_data("lab")
+    data = helpers.fixture_data("lab")
     data["prefix"] = "new1"
     problems = validate.problems(models.Answers.model_validate(data), repo)
     assert len(problems) == 2
     assert problems[0].startswith(
-        f"imports.0-bootstrap: {_AUTOMATION} imports lab1-prod-iac-core-0, "
+        f"imports.0-bootstrap: {conftest.AUTOMATION_ADDRESS} imports "
+        "lab1-prod-iac-core-0, "
         "but Stage 0 names that project new1-prod-iac-core-0"
     )
     assert "new1-prod-audit-logs-0" in problems[1]
 
 
 def test_swapped_import_id_is_a_problem(repo):
-    answers = _answers(
-        imports={"0-bootstrap": {_AUTOMATION: "tst-prod-audit-logs-0"}}
+    answers = helpers.minimal_answers(
+        imports={
+            "0-bootstrap": {
+                conftest.AUTOMATION_ADDRESS: "tst-prod-audit-logs-0"
+            }
+        }
     )
     problems = validate.problems(answers, repo)
     assert len(problems) == 1
@@ -221,7 +234,7 @@ def test_swapped_import_id_is_a_problem(repo):
 
 
 def test_unknown_import_addresses_keep_any_id(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         imports={
             "0-bootstrap": {"google_storage_bucket.extra": "any-bucket"},
             "1-resman": {
@@ -233,7 +246,7 @@ def test_unknown_import_addresses_keep_any_id(repo):
 
 
 def test_problems_include_override_problems(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         overrides={
             "0-bootstrap": {"prefix": "other", "not_a_var": 1},
             "1-resman": {"prefix": "zzz"},
@@ -245,7 +258,7 @@ def test_problems_include_override_problems(repo):
 
 
 def test_existing_org_policies_declared_by_stage0(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         existing_org_policies=[
             "iam.allowedPolicyMemberDomains",
             "compute.skipDefaultNetworkCreation",
@@ -255,7 +268,7 @@ def test_existing_org_policies_declared_by_stage0(repo):
 
 
 def test_existing_org_policies_reject_custom_and_undeclared(repo):
-    answers = _answers(
+    answers = helpers.minimal_answers(
         existing_org_policies=["custom.kmsRotation", "unmanaged.constraint"]
     )
     problems = validate.problems(answers, repo)
@@ -270,8 +283,11 @@ def test_existing_org_policies_conflict_with_import_defaults(repo):
     overrides = {
         "0-bootstrap": {"org_policies_config": {"import_defaults": True}}
     }
-    assert validate.problems(_answers(overrides=overrides), repo) == []
-    answers = _answers(
+    assert (
+        validate.problems(helpers.minimal_answers(overrides=overrides), repo)
+        == []
+    )
+    answers = helpers.minimal_answers(
         overrides=overrides,
         existing_org_policies=["iam.allowedPolicyMemberDomains"],
     )
@@ -284,7 +300,7 @@ def test_existing_org_policies_conflict_with_import_defaults(repo):
 def test_existing_org_policies_accept_any_regime(repo):
     # The list stays valid when the regime omits a templated policy,
     # because the import filter drops it.
-    answers = _answers(
+    answers = helpers.minimal_answers(
         existing_org_policies=[
             "compute.managed.restrictProtocolForwardingCreationForTypes"
         ]

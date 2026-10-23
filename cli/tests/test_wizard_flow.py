@@ -18,8 +18,8 @@ import copy
 
 import pytest
 
-import answer_fixtures
 import conftest
+import helpers
 from stellar_engine.config import models
 from stellar_engine.config import validate
 from stellar_engine.gcp import api
@@ -28,9 +28,6 @@ from stellar_engine.wizard import discovery
 from stellar_engine.wizard import flow
 from stellar_engine.wizard import prompts
 
-AUTOMATION = "module.automation-project.google_project.project[0]"
-LOG_EXPORT = "module.log-export-project.google_project.project[0]"
-BILLING_EXPORT = "module.billing-export-project[0].google_project.project[0]"
 OTHER = "module.other.google_storage_bucket.bucket"
 
 
@@ -148,7 +145,7 @@ def test_offline_fresh_run_needs_typed_values(repo):
 
 
 def test_rerun_keeps_existing_answers(repo, discovered):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         kms_protection_level="SOFTWARE",
         essential_contacts=f"ops@{conftest.DOMAIN}",
         bootstrap_user=f"admin@{conftest.DOMAIN}",
@@ -185,7 +182,7 @@ def test_rerun_keeps_existing_answers(repo, discovered):
 
 
 def test_section_subset_asks_only_those(repo, discovered):
-    data = answer_fixtures.answer_data()
+    data = helpers.minimal_data()
     result, prompter = _run(
         data, ["new", None], repo, discovered, sections=["kms", "prefix"]
     )
@@ -208,7 +205,7 @@ def test_unknown_section():
 
 
 def test_tenants_show_project_ids_and_characters_left(repo, discovered):
-    data = answer_fixtures.answer_data(resman={"envs": {"Prod": {}}})
+    data = helpers.minimal_data(resman={"envs": {"Prod": {}}})
     result, prompter = _run(
         data,
         ["ten1, ten2", "Tenant one", None, None, "group:t2@example.com"],
@@ -231,7 +228,7 @@ def test_tenants_show_project_ids_and_characters_left(repo, discovered):
 
 
 def test_tenant_key_rejected_when_ids_too_long(repo, discovered):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         prefix="abcdefg", resman={"envs": {"Prod1": {}}}
     )
     result, prompter = _run(
@@ -247,7 +244,7 @@ def test_tenant_key_rejected_when_ids_too_long(repo, discovered):
 
 def test_tenant_key_limit_from_repo(repo, discovered):
     limit = repo.tenant_key_max_length()
-    data = answer_fixtures.answer_data(resman={"envs": {"P": {}}})
+    data = helpers.minimal_data(resman={"envs": {"P": {}}})
     result, prompter = _run(
         data,
         ["a" * (limit + 1), "a" * limit, None, None],
@@ -264,14 +261,14 @@ def test_tenant_key_limit_from_repo(repo, discovered):
 
 @pytest.mark.parametrize("regime", ["IL5", "FEDRAMP_HIGH"])
 def test_region_choices_follow_regime(repo, discovered, regime):
-    data = answer_fixtures.answer_data(compliance={"regime": regime})
+    data = helpers.minimal_data(compliance={"regime": regime})
     _, prompter = _run(data, [None, None], repo, discovered, ["region"])
     expected = sorted(regions.supported_regions(regime) or ())
     assert prompter.choices[f"Region for {regime}"] == expected
 
 
 def test_region_outside_regime_is_flagged(repo, discovered):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         region="us-south1", compliance={"regime": "IL5"}
     )
     result, prompter = _run(data, [None, None], repo, discovered, ["region"])
@@ -282,7 +279,7 @@ def test_region_outside_regime_is_flagged(repo, discovered):
 
 
 def test_region_without_table_is_typed(repo, discovered):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         compliance={"regime": "COMPLIANCE_REGIME_UNSPECIFIED"}
     )
     result, prompter = _run(
@@ -293,9 +290,7 @@ def test_region_without_table_is_typed(repo, discovered):
 
 
 def test_region_keeps_only_a_different_location(repo, discovered):
-    data = answer_fixtures.answer_data(
-        compliance={"regime": "IL5", "location": "us"}
-    )
+    data = helpers.minimal_data(compliance={"regime": "IL5", "location": "us"})
     result, _ = _run(data, [None, "us-east4"], repo, discovered, ["region"])
     assert result["compliance"] == {"regime": "IL5"}
     result, _ = _run(data, [None, None], repo, discovered, ["region"])
@@ -304,7 +299,7 @@ def test_region_keeps_only_a_different_location(repo, discovered):
 
 def test_regime_choices_come_from_repo(repo, discovered):
     _, prompter = _run(
-        answer_fixtures.answer_data(), [None], repo, discovered, ["compliance"]
+        helpers.minimal_data(), [None], repo, discovered, ["compliance"]
     )
     choices = prompter.choices["Compliance regime"]
     assert sorted(choices) == repo.regime_names()
@@ -322,20 +317,20 @@ def test_regime_choices_come_from_repo(repo, discovered):
     ],
 )
 def test_kms_stored_only_when_changed(repo, discovered, regime, picked, stored):
-    data = answer_fixtures.answer_data(compliance={"regime": regime})
+    data = helpers.minimal_data(compliance={"regime": regime})
     result, prompter = _run(data, [picked], repo, discovered, ["kms"])
     assert result.get("kms_protection_level") == stored
     assert any("derives KMS protection level" in n for n in prompter.notes)
 
 
 def test_kms_explicit_value_is_the_default(repo, discovered):
-    data = answer_fixtures.answer_data(kms_protection_level="SOFTWARE")
+    data = helpers.minimal_data(kms_protection_level="SOFTWARE")
     result, _ = _run(data, [None], repo, discovered, ["kms"])
     assert result["kms_protection_level"] == "SOFTWARE"
 
 
 def test_kms_back_to_derived_clears_value(repo, discovered):
-    data = answer_fixtures.answer_data(kms_protection_level="SOFTWARE")
+    data = helpers.minimal_data(kms_protection_level="SOFTWARE")
     result, _ = _run(data, ["HSM"], repo, discovered, ["kms"])
     assert "kms_protection_level" not in result
 
@@ -346,7 +341,7 @@ def test_several_orgs_are_offered_as_choices(repo, cloud, local_tools):
         api.Organization("222222222222", "two.example.com", "C0000002"),
     ]
     found = discovery.discover(cloud, local_tools)
-    data = answer_fixtures.answer_data()
+    data = helpers.minimal_data()
     del data["organization"]
     result, prompter = _run(
         data, ["222222222222", None, None], repo, found, ["organization"]
@@ -365,7 +360,7 @@ def test_changed_org_takes_discovered_domain(repo, cloud, local_tools):
     ]
     found = discovery.discover(cloud, local_tools)
     result, _ = _run(
-        answer_fixtures.answer_data(),
+        helpers.minimal_data(),
         ["222222222222", None, None],
         repo,
         found,
@@ -377,7 +372,7 @@ def test_changed_org_takes_discovered_domain(repo, cloud, local_tools):
 def test_closed_billing_accounts_are_not_defaults(repo, cloud, local_tools):
     cloud.billing_accounts = [api.BillingAccount(conftest.BILLING, False)]
     found = discovery.discover(cloud, local_tools)
-    data = answer_fixtures.answer_data()
+    data = helpers.minimal_data()
     del data["billing"]
     result, prompter = _run(
         data,
@@ -394,7 +389,7 @@ def test_service_account_is_not_a_contact_default(repo, cloud, local_tools):
     local_tools.account = "sa@example-bootstrap.iam.gserviceaccount.com"
     found = discovery.discover(cloud, local_tools)
     result, prompter = _run(
-        answer_fixtures.answer_data(alert_email=None),
+        helpers.minimal_data(alert_email=None),
         [None, f"alerts@{conftest.DOMAIN}", None, None],
         repo,
         found,
@@ -410,7 +405,7 @@ def test_service_account_is_not_a_contact_default(repo, cloud, local_tools):
 
 def test_essential_contacts_map_is_kept(repo, discovered):
     contacts = {f"ops@{conftest.DOMAIN}": ["ALL"]}
-    data = answer_fixtures.answer_data(essential_contacts=contacts)
+    data = helpers.minimal_data(essential_contacts=contacts)
     result, prompter = _run(data, [None, None], repo, discovered, ["contacts"])
     assert result["essential_contacts"] == contacts
     assert any("essential_contacts map" in note for note in prompter.notes)
@@ -421,11 +416,11 @@ def test_groups_store_only_renames(repo, discovered):
     script: list[object] = [True, "renamed-first"]
     script += [None] * (len(defaults) - 1)
     result, _ = _run(
-        answer_fixtures.answer_data(), script, repo, discovered, ["groups"]
+        helpers.minimal_data(), script, repo, discovered, ["groups"]
     )
     assert result["groups"] == {next(iter(defaults)): "renamed-first"}
     result, _ = _run(
-        {**answer_fixtures.answer_data(), "groups": result["groups"]},
+        {**helpers.minimal_data(), "groups": result["groups"]},
         [False],
         repo,
         discovered,
@@ -437,7 +432,7 @@ def test_groups_store_only_renames(repo, discovered):
 def test_envs_with_custom_admins(repo, discovered):
     default_admin = f"gcp-organization-admins@{conftest.DOMAIN}"
     result, prompter = _run(
-        answer_fixtures.answer_data(),
+        helpers.minimal_data(),
         ["Prod, Dev", True, f"prod@{conftest.DOMAIN}", None],
         repo,
         discovered,
@@ -452,7 +447,7 @@ def test_envs_with_custom_admins(repo, discovered):
 
 def test_env_keys_validated(repo, discovered):
     result, prompter = _run(
-        answer_fixtures.answer_data(),
+        helpers.minimal_data(),
         ["Prod, prod", "", "1st", "Prod", None],
         repo,
         discovered,
@@ -468,23 +463,23 @@ def test_env_keys_validated(repo, discovered):
         (
             {"no_iam": True},
             {
-                AUTOMATION: "tst-prod-iac-core-0",
-                LOG_EXPORT: "tst-prod-audit-logs-0",
+                conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0",
+                conftest.LOG_EXPORT_ADDRESS: "tst-prod-audit-logs-0",
             },
         ),
         (
             {"no_iam": False},
             {
-                AUTOMATION: "tst-prod-iac-core-0",
-                LOG_EXPORT: "tst-prod-audit-logs-0",
-                BILLING_EXPORT: "tst-prod-billing-exp-0",
+                conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0",
+                conftest.LOG_EXPORT_ADDRESS: "tst-prod-audit-logs-0",
+                conftest.BILLING_EXPORT_ADDRESS: "tst-prod-billing-exp-0",
             },
         ),
         (
             {"no_iam": False, "is_org_level": False},
             {
-                AUTOMATION: "tst-prod-iac-core-0",
-                LOG_EXPORT: "tst-prod-audit-logs-0",
+                conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0",
+                conftest.LOG_EXPORT_ADDRESS: "tst-prod-audit-logs-0",
             },
         ),
     ],
@@ -492,12 +487,15 @@ def test_env_keys_validated(repo, discovered):
 def test_bootstrap_precreated_projects_become_imports(
     repo, discovered, billing, expected
 ):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         billing={"account_id": conftest.BILLING, **billing}
     )
     result, prompter = _run(data, [None, True], repo, discovered, ["bootstrap"])
     assert result["imports"] == {"0-bootstrap": expected}
-    assert f"  import {AUTOMATION} = tst-prod-iac-core-0" in prompter.notes
+    assert (
+        f"  import {conftest.AUTOMATION_ADDRESS} = tst-prod-iac-core-0"
+        in prompter.notes
+    )
 
 
 @pytest.mark.parametrize(
@@ -506,33 +504,33 @@ def test_bootstrap_precreated_projects_become_imports(
 def test_bootstrap_notes_why_billing_export_is_not_imported(
     repo, discovered, billing
 ):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         billing={"account_id": conftest.BILLING, **billing}
     )
     _, prompter = _run(data, [None, True], repo, discovered, ["bootstrap"])
     assert (
-        f"  Stage 0 creates {BILLING_EXPORT} only when billing.no_iam is "
-        "false and billing.is_org_level is true, so Stage 0 imports nothing "
-        "for it."
+        f"  Stage 0 creates {conftest.BILLING_EXPORT_ADDRESS} only when "
+        "billing.no_iam is false and billing.is_org_level is true, so "
+        "Stage 0 imports nothing for it."
     ) in prompter.notes
 
 
 def test_stage0_project_addresses_match_repo(repo):
     projects = repo.stage0_projects()
     assert [project.address for project in projects] == [
-        AUTOMATION,
-        LOG_EXPORT,
-        BILLING_EXPORT,
+        conftest.AUTOMATION_ADDRESS,
+        conftest.LOG_EXPORT_ADDRESS,
+        conftest.BILLING_EXPORT_ADDRESS,
     ]
     assert projects[0].count is None
     assert "billing_mode" in (projects[2].count or "")
 
 
 def test_bootstrap_declining_removes_only_project_imports(repo, discovered):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         imports={
             "0-bootstrap": {
-                AUTOMATION: "tst-prod-iac-core-0",
+                conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0",
                 OTHER: "other-bucket",
             }
         }
@@ -548,54 +546,63 @@ def test_bootstrap_declining_removes_only_project_imports(repo, discovered):
 
 
 def test_bootstrap_declining_drops_empty_imports(repo, discovered):
-    data = answer_fixtures.answer_data(
-        imports={"0-bootstrap": {AUTOMATION: "x-prod-iac-core-0"}}
+    data = helpers.minimal_data(
+        imports={
+            "0-bootstrap": {conftest.AUTOMATION_ADDRESS: "x-prod-iac-core-0"}
+        }
     )
     result, _ = _run(data, [None, False], repo, discovered, ["bootstrap"])
     assert "imports" not in result
 
 
 def test_bootstrap_rerun_defaults_to_existing_imports(repo, discovered):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         billing={"account_id": conftest.BILLING, "no_iam": True},
-        imports={"0-bootstrap": {AUTOMATION: "tst-prod-iac-core-0"}},
+        imports={
+            "0-bootstrap": {conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0"}
+        },
     )
     result, _ = _run(data, [None, None], repo, discovered, ["bootstrap"])
-    assert set(result["imports"]["0-bootstrap"]) == {AUTOMATION, LOG_EXPORT}
+    assert set(result["imports"]["0-bootstrap"]) == {
+        conftest.AUTOMATION_ADDRESS,
+        conftest.LOG_EXPORT_ADDRESS,
+    }
 
 
 def test_prefix_change_updates_imports(repo, discovered):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         billing={"account_id": conftest.BILLING, "no_iam": True},
         imports={
             "0-bootstrap": {
-                AUTOMATION: "tst-prod-iac-core-0",
-                LOG_EXPORT: "tst-prod-audit-logs-0",
+                conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0",
+                conftest.LOG_EXPORT_ADDRESS: "tst-prod-audit-logs-0",
             }
         },
     )
     result, prompter = _run(data, ["abc"], repo, discovered, ["prefix"])
     assert result["imports"]["0-bootstrap"] == {
-        AUTOMATION: "abc-prod-iac-core-0",
-        LOG_EXPORT: "abc-prod-audit-logs-0",
+        conftest.AUTOMATION_ADDRESS: "abc-prod-iac-core-0",
+        conftest.LOG_EXPORT_ADDRESS: "abc-prod-audit-logs-0",
     }
     assert "Updated the Stage 0 imports:" in prompter.notes
 
 
 def test_billing_change_adds_billing_export_import(repo, discovered):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         billing={"account_id": conftest.BILLING, "no_iam": True},
-        imports={"0-bootstrap": {AUTOMATION: "tst-prod-iac-core-0"}},
+        imports={
+            "0-bootstrap": {conftest.AUTOMATION_ADDRESS: "tst-prod-iac-core-0"}
+        },
     )
     result, _ = _run(
         data, [None, None, False, None], repo, discovered, ["billing"]
     )
-    assert BILLING_EXPORT in result["imports"]["0-bootstrap"]
+    assert conftest.BILLING_EXPORT_ADDRESS in result["imports"]["0-bootstrap"]
 
 
 def test_invalid_answer_reasks_owning_section(repo, discovered):
     # A stored prefix the model rejects sends the wizard back to prefix.
-    data = answer_fixtures.answer_data(prefix="Bad_Prefix")
+    data = helpers.minimal_data(prefix="Bad_Prefix")
     result, prompter = _run(data, [None, "good"], repo, discovered, ["tenants"])
     assert result["prefix"] == "good"
     assert prompter.asked == [
@@ -606,7 +613,7 @@ def test_invalid_answer_reasks_owning_section(repo, discovered):
 
 
 def test_long_tenant_ids_reask_prefix_envs_and_tenants(repo, discovered):
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         prefix="abcdefg",
         resman={"envs": {"Prod": {}}, "tenants": {"tenant": {}}},
     )
@@ -629,7 +636,7 @@ def test_long_tenant_ids_reask_prefix_envs_and_tenants(repo, discovered):
 def test_retries_are_bounded(repo, discovered):
     # The bootstrap section keeps foreign import entries, so a malformed one
     # survives every round.
-    data = answer_fixtures.answer_data(
+    data = helpers.minimal_data(
         imports={"0-bootstrap": {"not an address": "x"}}
     )
     script = [None, None] * (flow.MAX_ROUNDS + 1)
@@ -648,7 +655,7 @@ def test_retries_are_bounded(repo, discovered):
 
 
 def test_problem_without_section_raises_at_once(repo, discovered):
-    data = answer_fixtures.answer_data(logging={"sink_type": "nope"})
+    data = helpers.minimal_data(logging={"sink_type": "nope"})
     prompter = prompts.ScriptedPrompter([None])
     with pytest.raises(flow.WizardError, match=r"logging\.sink_type"):
         flow.run(
@@ -666,6 +673,9 @@ def test_problem_without_section_raises_at_once(repo, discovered):
         ("prefix", ("prefix",)),
         ("compliance.regime", ("compliance",)),
         ("compliance.location", ("region",)),
+        ("compliance.allow_unlisted_region", ("region",)),
+        ("bootstrap_user", ("contacts",)),
+        ("bootstrap_project", ("bootstrap",)),
         ("region", ("region",)),
         ("billing.account_id", ("billing",)),
         ("billing_override", ()),

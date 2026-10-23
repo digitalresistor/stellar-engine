@@ -16,10 +16,10 @@
 
 import datetime
 import hashlib
-import stat
 
 import pytest
 
+import conftest
 from stellar_engine.render import writer
 
 NOW = datetime.datetime(2026, 10, 23, 12, 30, 5, tzinfo=datetime.UTC)
@@ -43,10 +43,6 @@ def _write(target, hash_file, content, **kwargs):
     return writer.write(target, content, hash_file, now=NOW, **options)
 
 
-def _mode(path):
-    return stat.S_IMODE(path.stat().st_mode)
-
-
 def _digest(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -60,9 +56,9 @@ def test_creates_missing_target(paths):
     assert '+a = "1"' in result.diff
     assert target.read_text() == 'a = "1"\n'
     assert hash_file.read_text() == _digest('a = "1"\n') + "\n"
-    assert _mode(target) == 0o600
-    assert _mode(hash_file) == 0o600
-    assert _mode(hash_file.parent) == 0o700
+    assert conftest.mode(target) == 0o600
+    assert conftest.mode(hash_file) == 0o600
+    assert conftest.mode(hash_file.parent) == 0o700
 
 
 def test_unchanged_refreshes_hash(paths):
@@ -114,9 +110,9 @@ def test_force_backs_up_then_writes(paths):
     assert backup is not None
     assert backup == target.with_name(f"terraform.tfvars.backup.{STAMP}")
     assert backup.read_text() == "edited\n"
-    assert _mode(backup) == 0o600
+    assert conftest.mode(backup) == 0o600
     assert target.read_text() == "new\n"
-    assert _mode(target) == 0o600
+    assert conftest.mode(target) == 0o600
     assert hash_file.read_text().strip() == _digest("new\n")
 
 
@@ -209,4 +205,5 @@ def test_outcome_values():
         "updated",
         "unchanged",
         "skipped",
+        "removed",
     ]

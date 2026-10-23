@@ -31,6 +31,7 @@ from typing import Annotated, Any
 
 import pydantic
 
+from stellar_engine import naming
 from stellar_engine import paths
 from stellar_engine import repo as repo_lib
 from stellar_engine.config import answers as answers_lib
@@ -44,10 +45,8 @@ from stellar_engine.wizard import prompts
 # Rounds of re-asking after the first pass before the wizard gives up.
 MAX_ROUNDS = 3
 
-_BOOTSTRAP_STAGE = paths.STAGES[0]
-_SERVICE_ACCOUNT_SUFFIX = ".gserviceaccount.com"
 # `0-bootstrap/main.tf` local.principals passes typed values through.
-_PRINCIPAL_RE = re.compile(r"^[a-zA-Z]+:\S+$")
+_PRINCIPAL_RE = re.compile(naming.PRINCIPAL_TYPE_RE.pattern + r"\S+$")
 _KMS_LEVELS: tuple[str, ...] = typing.get_args(
     typing.get_args(
         models.Answers.model_fields["kms_protection_level"].annotation
@@ -99,44 +98,28 @@ def _put(data, path, value):
         target[keys[-1]] = value
 
 
-def _view(data):
-    """Builds unvalidated Answers that `derive` functions can read.
+def _default_envs():
+    return {key: {} for key in models.Resman().envs}
 
-    Mid-wizard data is incomplete, so it cannot pass validation; the
-    derive functions only read the fields set here.
-    """
-    resman = _get(data, "resman", {})
-    envs = resman.get("envs")
-    if envs is None:
-        envs = {key: {} for key in models.Resman().envs}
-    return models.Answers.model_construct(
-        prefix=data.get("prefix", ""),
-        region=data.get("region", ""),
-        kms_protection_level=data.get("kms_protection_level"),
-        compliance=models.Compliance.model_construct(
-            regime=_get(data, "compliance.regime", ""),
-            location=_get(data, "compliance.location"),
-        ),
-        organization=models.Organization.model_construct(
-            domain=_get(data, "organization.domain", "")
-        ),
-        billing=models.Billing.model_construct(
-            no_iam=bool(_get(data, "billing.no_iam", False)),
-            is_org_level=bool(_get(data, "billing.is_org_level", True)),
-        ),
-        groups=dict(data.get("groups") or {}),
-        resman=models.Resman.model_construct(
-            envs={
-                key: models.EnvFolder.model_construct(**(value or {}))
-                for key, value in envs.items()
-            },
-            tenants={
-                key: models.Tenant.model_construct(
-                    admin_principal=(value or {}).get("admin_principal")
-                )
-                for key, value in resman.get("tenants", {}).items()
-            },
-        ),
+
+def _env_keys(data):
+    envs = _get(data, "resman.envs")
+    return list(_default_envs() if envs is None else envs)
+
+
+def _group_principal(data, ctx, key):
+    """Returns a Stage 0 group principal, as `derive.group_principal`."""
+    name = naming.group_name(
+        data.get("groups") or {}, ctx.repo.default_groups(), key
+    )
+    return naming.group_principal(name, _get(data, "organization.domain", ""))
+
+
+def _created_stage0_projects(data, ctx):
+    """Returns the Stage 0 projects Stage 0 creates, as `derive` does."""
+    return ctx.repo.created_stage0_projects(
+        no_iam=bool(_get(data, "billing.no_iam", False)),
+        is_org_level=bool(_get(data, "billing.is_org_level", True)),
     )
 
 
@@ -318,29 +301,31 @@ def _sync_stage0_imports(data, ctx, enabled):
         Whether the entries changed.
     """
     imports = copy.deepcopy(data.get("imports") or {})
-    stage = dict(imports.get(_BOOTSTRAP_STAGE) or {})
+    stage = dict(imports.get(paths.BOOTSTRAP) or {})
     before = dict(stage)
     for project in ctx.repo.stage0_projects():
         stage.pop(project.address, None)
     if enabled:
-        view = _view(data)
-        for project in derive.stage0_projects(view, ctx.repo):
-            stage[project.address] = derive.stage0_project_id(view, project)
-    _put(imports, _BOOTSTRAP_STAGE, stage or None)
+        prefix = data.get("prefix", "")
+        for project in _created_stage0_projects(data, ctx):
+            stage[project.address] = naming.stage0_project_id(
+                prefix, project.name
+            )
+    _put(imports, paths.BOOTSTRAP, stage or None)
     _put(data, "imports", imports or None)
     return stage != before
 
 
 def _has_stage0_imports(data, ctx):
-    stage = _get(data, f"imports.{_BOOTSTRAP_STAGE}", {}) or {}
+    stage = _get(data, f"imports.{paths.BOOTSTRAP}", {}) or {}
     return any(
         project.address in stage for project in ctx.repo.stage0_projects()
     )
 
 
 def _note_imports(data, ctx):
-    stage = _get(data, f"imports.{_BOOTSTRAP_STAGE}", {}) or {}
-    created = derive.stage0_projects(_view(data), ctx.repo)
+    stage = _get(data, f"imports.{paths.BOOTSTRAP}", {}) or {}
+    created = _created_stage0_projects(data, ctx)
     for project in ctx.repo.stage0_projects():
         if project.address in stage:
             ctx.prompter.note(
@@ -349,7 +334,7 @@ def _note_imports(data, ctx):
         elif project not in created:
             ctx.prompter.note(
                 f"  Stage 0 creates {project.address} only when "
-                "billing.no_iam is false and billing.is_org_level is true, "
+                f"{repo_lib.BILLING_EXPORT_CONDITION}, "
                 "so Stage 0 imports nothing for it."
             )
 
@@ -455,11 +440,10 @@ def ask_kms(data: dict, ctx: _Context) -> None:
         data: Answer data, which the section updates in place.
         ctx: The prompter, the engine checkout and the discovered defaults.
     """
-    view = _view({**data, "kms_protection_level": None})
-    derived = derive.kms_protection_level(view)
+    regime = _get(data, "compliance.regime", "")
+    derived = naming.kms_protection_level(regime)
     ctx.prompter.note(
-        f"Stage 0 derives KMS protection level {derived} for "
-        f"{view.compliance.regime}."
+        f"Stage 0 derives KMS protection level {derived} for {regime}."
     )
     level = ctx.prompter.select(
         "KMS protection level",
@@ -471,7 +455,7 @@ def ask_kms(data: dict, ctx: _Context) -> None:
 
 def _user_account(ctx):
     account = ctx.discovered.gcloud_account
-    if account and not account.endswith(_SERVICE_ACCOUNT_SUFFIX):
+    if account and not account.endswith(naming.SERVICE_ACCOUNT_SUFFIX):
         return account
     return None
 
@@ -563,7 +547,7 @@ def ask_envs(data: dict, ctx: _Context) -> None:
     """
     current = _get(data, "resman.envs")
     if current is None:
-        current = {key: {} for key in models.Resman().envs}
+        current = _default_envs()
     keys = _split(
         ctx.prompter.text(
             "Stage 1 environment keys, comma-separated",
@@ -572,8 +556,8 @@ def ask_envs(data: dict, ctx: _Context) -> None:
         )
     )
     envs = {key: dict(current.get(key) or {}) for key in keys}
-    default_admin = derive.group_email(
-        _view(data), ctx.repo, derive.ORGANIZATION_ADMINS
+    default_admin = naming.principal_email(
+        _group_principal(data, ctx, derive.ORGANIZATION_ADMINS)
     )
     custom = ctx.prompter.confirm(
         f"Use folder admins other than {default_admin}?",
@@ -594,12 +578,9 @@ def ask_envs(data: dict, ctx: _Context) -> None:
 
 
 def _tenant_ids(data, key):
-    view = _view(data)
-    view.resman.tenants = {key: models.Tenant.model_construct()}
-    return (
-        derive.tenant_project_ids(view)[key]
-        + (derive.tenant_service_account_ids(view)[key])
-    )
+    prefix, envs = data.get("prefix", ""), _env_keys(data)
+    projects = naming.tenant_project_ids(prefix, envs, key)
+    return projects + naming.tenant_service_account_ids(prefix, envs, key)
 
 
 def ask_tenants(data: dict, ctx: _Context) -> None:
@@ -638,7 +619,7 @@ def ask_tenants(data: dict, ctx: _Context) -> None:
             validate=check,
         )
     )
-    default_admin = derive.group_principal(_view(data), ctx.repo, derive.DEVOPS)
+    default_admin = _group_principal(data, ctx, derive.DEVOPS)
     tenants = {}
     for key in keys:
         tenant = dict(current.get(key) or {})
@@ -663,54 +644,64 @@ def ask_tenants(data: dict, ctx: _Context) -> None:
     resman = dict(data.get("resman") or {})
     resman["tenants"] = tenants
     data["resman"] = resman
-    view = _view(data)
-    for key, project_ids in derive.tenant_project_ids(view).items():
+    for key in tenants:
         ctx.prompter.note(f"Tenant {key} projects:")
-        for project_id in project_ids:
+        for project_id in naming.tenant_project_ids(
+            data.get("prefix", ""), _env_keys(data), key
+        ):
             left = validate.ID_MAX_LENGTH - len(project_id)
             ctx.prompter.note(f"  {project_id}  {left} characters left")
 
 
-SECTIONS: Mapping[str, Callable[[dict, _Context], None]] = {
-    "prefix": ask_prefix,
-    "organization": ask_organization,
-    "billing": ask_billing,
-    "bootstrap": ask_bootstrap,
+@dataclasses.dataclass(frozen=True)
+class Section:
+    """A wizard section and the answer fields it writes.
+
+    Attributes:
+        ask: Asks for the fields and updates the answer data in place.
+        fields: Dotted field paths the section owns, so a problem in one of
+            them, or below it, re-asks this section.
+    """
+
+    ask: Callable[[dict, _Context], None]
+    fields: tuple[str, ...]
+
+
+SECTIONS: Mapping[str, Section] = {
+    "prefix": Section(ask_prefix, ("prefix",)),
+    "organization": Section(ask_organization, ("organization",)),
+    "billing": Section(ask_billing, ("billing",)),
+    "bootstrap": Section(ask_bootstrap, ("bootstrap_project", "imports")),
     # The regime comes before the region, because it limits the regions.
-    "compliance": ask_compliance,
-    "region": ask_region,
-    "kms": ask_kms,
-    "contacts": ask_contacts,
-    "groups": ask_groups,
-    "envs": ask_envs,
-    "tenants": ask_tenants,
+    "compliance": Section(ask_compliance, ("compliance",)),
+    "region": Section(
+        ask_region,
+        ("region", "compliance.location", "compliance.allow_unlisted_region"),
+    ),
+    "kms": Section(ask_kms, ("kms_protection_level",)),
+    "contacts": Section(
+        ask_contacts, ("alert_email", "essential_contacts", "bootstrap_user")
+    ),
+    "groups": Section(ask_groups, ("groups",)),
+    "envs": Section(ask_envs, ("resman.envs",)),
+    "tenants": Section(ask_tenants, ("resman.tenants",)),
 }
 
-# Field prefix to the section that asks for it, most specific first.
-_OWNERS = (
-    ("compliance.location", ("region",)),
-    ("compliance.allow_unlisted_region", ("region",)),
-    ("compliance", ("compliance",)),
-    ("region", ("region",)),
-    ("prefix", ("prefix",)),
-    ("organization", ("organization",)),
-    ("billing", ("billing",)),
-    ("bootstrap_project", ("bootstrap",)),
-    ("imports", ("bootstrap",)),
-    ("kms_protection_level", ("kms",)),
-    ("alert_email", ("contacts",)),
-    ("essential_contacts", ("contacts",)),
-    ("bootstrap_user", ("contacts",)),
-    ("groups", ("groups",)),
-    ("resman.envs", ("envs",)),
-    # A derived tenant ID gets too long from the prefix, env or tenant key.
-    ("resman.tenants.", ("prefix", "envs", "tenants")),
-    ("resman.tenants", ("tenants",)),
-)
+# A problem under one tenant key, such as a derived ID that gets too long,
+# comes from the prefix, the env keys or the tenant key.
+_TENANT_FIELD_PREFIX = "resman.tenants."
+_TENANT_FIELD_OWNERS = ("prefix", "envs", "tenants")
+
+
+def _covers(owned, field):
+    return field == owned or field.startswith((f"{owned}.", f"{owned}["))
 
 
 def owners(field: str) -> tuple[str, ...]:
     """Returns the sections that ask for a field.
+
+    The section that owns the most specific field path wins, so
+    `compliance.location` belongs to the region section.
 
     Args:
         field: Dotted field path, such as `compliance.regime`.
@@ -719,13 +710,17 @@ def owners(field: str) -> tuple[str, ...]:
         Section names, empty when no section asks for the field, such as
         `overrides`.
     """
-    for prefix, sections in _OWNERS:
-        if prefix.endswith("."):
-            if field.startswith(prefix):
-                return sections
-        elif field == prefix or field.startswith((f"{prefix}.", f"{prefix}[")):
-            return sections
-    return ()
+    if field.startswith(_TENANT_FIELD_PREFIX):
+        return _TENANT_FIELD_OWNERS
+    matches = [
+        (len(owned), name)
+        for name, section in SECTIONS.items()
+        for owned in section.fields
+        if _covers(owned, field)
+    ]
+    if not matches:
+        return ()
+    return (max(matches)[1],)
 
 
 def problems(data: dict, repo: repo_lib.Repo) -> list[tuple[str, str]]:
@@ -741,11 +736,10 @@ def problems(data: dict, repo: repo_lib.Repo) -> list[tuple[str, str]]:
     try:
         parsed = models.Answers.model_validate(answers_lib.plain(data))
     except pydantic.ValidationError as error:
-        found = []
-        for item in error.errors():
-            field = ".".join(str(part) for part in item["loc"]) or "answers"
-            found.append((field, f"{field}: {item['msg']}"))
-        return found
+        return [
+            (field, f"{field}: {message}")
+            for field, message in answers_lib.error_fields(error)
+        ]
     return [
         (problem.split(maxsplit=1)[0].rstrip(":"), problem)
         for problem in validate.problems(parsed, repo)
@@ -764,7 +758,7 @@ def _ordered(sections):
 
 def _ask(names, data, ctx):
     for name in names:
-        SECTIONS[name](data, ctx)
+        SECTIONS[name].ask(data, ctx)
     # A new prefix or billing mode changes which Stage 0 projects exist and
     # their IDs, so imports that the bootstrap section added follow along.
     if _has_stage0_imports(data, ctx) and _sync_stage0_imports(
