@@ -34,8 +34,11 @@ TENANT_KEY_PATTERN = r"^[a-z][a-z0-9-]*$"
 # Stage 1 lowercases `<env>-<tenant>` into project and service account IDs,
 # so env keys may use capitals but only characters valid in those IDs.
 ENV_KEY_PATTERN = r"^[A-Za-z][A-Za-z0-9-]*$"
+# An organization policy constraint such as `iam.allowedPolicyMemberDomains`.
+CONSTRAINT_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$"
 
 _NonEmpty = Annotated[str, pydantic.Field(min_length=1)]
+_Constraint = Annotated[str, pydantic.Field(pattern=CONSTRAINT_PATTERN)]
 
 
 class _Model(pydantic.BaseModel):
@@ -217,6 +220,9 @@ class Answers(_Model):
             import ID, for resources that exist before the first apply,
             such as projects pre-created where billing linkage needs a
             human.
+        existing_org_policies: Constraints whose organization policies
+            exist before Stage 0 and that Stage 0 declares, which the final
+            Stage 0 apply imports. `stellar imports scan` fills it.
     """
 
     schema_version: Literal[1] = 1
@@ -245,6 +251,14 @@ class Answers(_Model):
     imports: dict[str, dict[str, _NonEmpty]] = pydantic.Field(
         default_factory=dict
     )
+    existing_org_policies: list[_Constraint] = pydantic.Field(
+        default_factory=list
+    )
+
+    @pydantic.field_validator("existing_org_policies")
+    @classmethod
+    def _sort_constraints(cls, value):
+        return sorted(set(value))
 
     @pydantic.field_validator("overrides", "imports")
     @classmethod

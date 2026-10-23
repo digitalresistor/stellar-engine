@@ -911,3 +911,137 @@ def test_init_accepts_a_home_that_holds_the_engine(runner, tmp_path):
     answers = answers_lib.load(home / "envs" / "tst" / "answers.yaml")
     assert answers.engine is not None
     assert answers.engine.path == str(engine)
+
+
+_SCANNED = [
+    "storage.uniformBucketLevelAccess",
+    "custom.kmsRotation",
+    "unmanaged.constraint",
+    "iam.allowedPolicyMemberDomains",
+]
+
+
+def test_imports_scan_without_environment_exits_2(runner, fake_cloud):
+    outcome = _invoke(runner, "imports", "scan")
+    assert outcome.exit_code == 2
+    assert "stellar init" in outcome.output
+
+
+def test_imports_scan_saves_declared_policies(
+    runner, fake_cloud, isolated_home, fake_tools
+):
+    assert _init(runner).exit_code == 0
+    path = isolated_home / "envs" / "tst" / "answers.yaml"
+    path.write_text("# my note\n" + path.read_text())
+    fake_cloud.org_policies = _SCANNED
+    outcome = _invoke(runner, "imports", "scan")
+    assert outcome.exit_code == 0, outcome.output
+    assert ("org_policies", conftest.ORG_ID) in fake_cloud.calls
+    for name in _SCANNED:
+        assert name in outcome.output
+    assert "Saved 2 organization policies" in outcome.output
+    assert "Next: stellar render" in outcome.output
+    assert _answers(isolated_home).existing_org_policies == [
+        "iam.allowedPolicyMemberDomains",
+        "storage.uniformBucketLevelAccess",
+    ]
+    assert "# my note" in path.read_text()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    rerun = _invoke(runner, "imports", "scan")
+    assert rerun.exit_code == 0, rerun.output
+    assert "already lists these policies" in rerun.output
+
+    render = _invoke(runner, "render", "--stage", "0")
+    assert render.exit_code == 0, render.output
+    text = _workspace(isolated_home, "0-bootstrap") / "0-bootstrap-imports.tf"
+    assert '"storage.uniformBucketLevelAccess",' in text.read_text()
+
+
+def test_imports_scan_clears_policies_that_are_gone(
+    runner, fake_cloud, isolated_home
+):
+    assert (
+        _init(
+            runner, sets=("existing_org_policies=[unmanaged.constraint]",)
+        ).exit_code
+        == 2
+    )
+    assert (
+        _init(
+            runner,
+            sets=("existing_org_policies=[iam.allowedPolicyMemberDomains]",),
+        ).exit_code
+        == 0
+    )
+    # A newer engine may drop a declared policy; the scan still runs.
+    path = isolated_home / "envs" / "tst" / "answers.yaml"
+    path.write_text(
+        path.read_text().replace(
+            "iam.allowedPolicyMemberDomains", "unmanaged.constraint"
+        )
+    )
+    assert _invoke(runner, "render").exit_code == 2
+    outcome = _invoke(runner, "imports", "scan")
+    assert outcome.exit_code == 0, outcome.output
+    assert "has no organization policies" in outcome.output
+    assert _answers(isolated_home).existing_org_policies == []
+
+
+def test_imports_scan_refuses_import_defaults(
+    runner, fake_cloud, isolated_home
+):
+    assert (
+        _init(
+            runner,
+            sets=(
+                "overrides.0-bootstrap.org_policies_config="
+                "{import_defaults: true}",
+            ),
+        ).exit_code
+        == 0
+    )
+    path = isolated_home / "envs" / "tst" / "answers.yaml"
+    before = path.read_text()
+    fake_cloud.org_policies = ["iam.allowedPolicyMemberDomains"]
+    outcome = _invoke(runner, "imports", "scan")
+    assert outcome.exit_code == 2
+    assert "import_defaults" in outcome.output
+    assert path.read_text() == before
+
+
+def test_imports_scan_follows_the_regime(runner, fake_cloud, isolated_home):
+    assert (
+        _init(runner, sets=("compliance.regime=FEDRAMP_MODERATE",)).exit_code
+        == 0
+    )
+    gated = "compute.managed.restrictProtocolForwardingCreationForTypes"
+    fake_cloud.org_policies = [gated, "custom.myOrgRule"]
+    outcome = _invoke(runner, "imports", "scan")
+    assert outcome.exit_code == 0, outcome.output
+    # The table wraps its cells, so check single words.
+    assert "regime" in outcome.output
+    assert "creates" not in outcome.output
+    assert _answers(isolated_home).existing_org_policies == []
+
+
+def test_imports_scan_reports_cloud_errors(runner, fake_cloud, isolated_home):
+    assert _init(runner).exit_code == 0
+    fake_cloud.org_policies = cli.api.AccessDeniedError("no orgpolicy access")
+    outcome = _invoke(runner, "imports", "scan")
+    assert outcome.exit_code == 1
+    assert "no orgpolicy access" in outcome.output
+
+
+def test_env_show_lists_existing_org_policies(runner, isolated_home):
+    assert (
+        _init(
+            runner,
+            sets=("existing_org_policies=[iam.allowedPolicyMemberDomains]",),
+        ).exit_code
+        == 0
+    )
+    outcome = _invoke(runner, "env", "show")
+    assert outcome.exit_code == 0, outcome.output
+    assert "Existing organization policies" in outcome.output
+    assert "  iam.allowedPolicyMemberDomains" in outcome.output

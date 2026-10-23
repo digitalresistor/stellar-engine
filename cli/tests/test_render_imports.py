@@ -51,6 +51,59 @@ def test_dumps_snapshot(snapshot):
     assert text == snapshot
 
 
+_POLICIES = [
+    "storage.uniformBucketLevelAccess",
+    "iam.allowedPolicyMemberDomains",
+    "compute.managed.restrictProtocolForwardingCreationForTypes",
+]
+
+
+def test_text_with_org_policies_snapshot(snapshot):
+    answers = render_fixtures.load_answers(
+        "lab", existing_org_policies=_POLICIES
+    )
+    assert imports.text(answers, "0") == snapshot
+
+
+def test_text_without_org_policies_matches_dumps():
+    answers = render_fixtures.load_answers("lab")
+    assert imports.text(answers, "0-bootstrap") == imports.dumps(
+        answers.imports["0-bootstrap"], imports.header("0", answers.prefix)
+    )
+
+
+def test_text_with_only_org_policies():
+    answers = _with_imports(existing_org_policies=_POLICIES)
+    text = imports.text(answers, "0")
+    assert text.startswith(
+        "# stellar render writes this file from envs/lab1/answers.yaml "
+        "imports.0-bootstrap and existing_org_policies.\n"
+    )
+    parsed = hcl2.loads(text)
+    assert len(parsed["import"]) == 1
+    block = parsed["import"][0]
+    assert "google_org_policy_policy.default[each.key]" in block["to"]
+    assert "var.bootstrap_user == null" in block["for_each"]
+    names = parsed["locals"][0]["stellar_existing_org_policies"]
+    assert [name.strip('"') for name in names] == sorted(_POLICIES)
+    assert (
+        "contains(keys(local.org_policies), name)"
+        in (parsed["locals"][0]["stellar_org_policy_imports"])
+    )
+
+
+def test_text_puts_org_policies_only_in_stage0():
+    answers = _with_imports(
+        stage="1-resman",
+        entries={"google_project.plain": "p"},
+        existing_org_policies=_POLICIES,
+    )
+    resman = imports.text(answers, "1-resman")
+    assert "org_policy" not in resman
+    assert "existing_org_policies" not in resman
+    assert imports.text(_with_imports(stage="1-resman"), "1") == ""
+
+
 def test_dumps_sorts_and_quotes():
     text = imports.dumps({_LOGGING: "b", _AUTOMATION: 'a"${x}'}, ["# header"])
     assert text == (
@@ -168,6 +221,29 @@ def test_write_removes_generated_file_when_empty(tmp_path):
     assert imports.write(tmp_path, "0", _with_imports()) is None
 
 
+def test_write_with_only_org_policies(tmp_path):
+    answers = _with_imports(existing_org_policies=_POLICIES)
+    path = imports.write(tmp_path, "0", answers)
+    assert path is not None
+    assert path.read_text(encoding="utf-8") == imports.text(answers, "0")
+    # Clearing the policies removes the generated file again.
+    assert imports.write(tmp_path, "0", _with_imports()) is None
+    assert not path.exists()
+
+
+def test_write_drops_org_policies_and_keeps_projects(tmp_path):
+    with_policies = render_fixtures.load_answers(
+        "lab", existing_org_policies=_POLICIES
+    )
+    path = imports.write(tmp_path, "0", with_policies)
+    assert path is not None
+    assert "stellar_existing_org_policies" in path.read_text(encoding="utf-8")
+    imports.write(tmp_path, "0", render_fixtures.load_answers("lab"))
+    text = path.read_text(encoding="utf-8")
+    assert "stellar_existing_org_policies" not in text
+    assert _AUTOMATION in text
+
+
 def test_write_ignores_other_stages(tmp_path):
     assert (
         imports.write(tmp_path, "1-resman", render_fixtures.load_answers("lab"))
@@ -251,3 +327,26 @@ def test_imports_validate_in_bootstrap_workspace(tmp_path):
     invalid = render_fixtures.terraform(ws, "validate")
     assert invalid.returncode != 0
     assert "no-such" in invalid.stderr + invalid.stdout
+
+
+@pytest.mark.terraform
+@pytest.mark.skipif(
+    shutil.which("terraform") is None,
+    reason="terraform is missing",
+)
+def test_org_policy_imports_validate_in_bootstrap_workspace(tmp_path):
+    answers = render_fixtures.load_answers(
+        "lab", existing_org_policies=_POLICIES
+    )
+    env = render_fixtures.env_paths(answers, home=tmp_path)
+    workspace.sync(env, conftest.REPO_ROOT, "0-bootstrap")
+    ws = env.workspace("0-bootstrap")
+    imports.write(ws, "0", answers)
+    init = render_fixtures.terraform(
+        ws, "init", "-backend=false", "-input=false"
+    )
+    assert init.returncode == 0, init.stderr
+    validate = render_fixtures.terraform(ws, "validate")
+    assert validate.returncode == 0, validate.stderr + validate.stdout
+    fmt = render_fixtures.terraform(ws, "fmt", "-check", imports.filename("0"))
+    assert fmt.returncode == 0, fmt.stdout

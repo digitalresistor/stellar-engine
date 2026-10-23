@@ -101,8 +101,9 @@ prompts only need Enter.
 
 - The `--answers-from` flag copies the organization, billing, groups, and
   tenants from another environment prefix or an `answers.yaml` path.
-- The copy never includes the prefix, the engine path, or the imports,
-  because those belong to the source environment.
+- The copy never includes the prefix, the engine path, the imports, or the
+  existing organization policies, because those belong to the source
+  environment.
 - The command lists the answers to review when the regime changes, such as
   an explicit `kms_protection_level` value.
 - The `--new-prefix` flag suggests a fresh prefix with a random suffix, so
@@ -119,6 +120,8 @@ Each prefix in a home is one environment, and every command that omits the
 - The `stellar env show` command prints the home, the answers file, the
   workspaces, and the values that the CLI derives, such as the KMS
   protection level and the project IDs.
+- The `stellar env show` command also lists the organization policies that
+  Stage 0 imports.
 - The `STELLAR_PREFIX` environment variable selects an environment the same
   way as the `--prefix` flag.
 - Every command stops when the current environment no longer exists and
@@ -189,7 +192,52 @@ imports:
 - The `--set` flag accepts an address in double quotes, such as
   `--set 'imports.0-bootstrap."module.automation-project.google_project.project[0]"=abc-prod-iac-core-0'`.
 
-## 7 Run preflight
+## 7 Import organization policies
+
+The `stellar imports scan` command records the organization policies that
+exist before Stage 0, so the final Stage 0 apply adopts them instead of
+failing to create them, and you no longer run the `import.sh` script.
+
+```bash
+uv run --project cli stellar imports scan
+uv run --project cli stellar render --stage 0
+```
+
+- The command lists the policies of the organization and only reads from
+  Google Cloud.
+- The command keeps each constraint that a `*_policy.yaml` file declares in
+  the `data/org-policies/` or `data/custom-org-policies/` folder of Stage 0.
+- The command skips a constraint that the templates in the
+  `data/custom-org-policies/` folder omit for the regime of the
+  environment.
+- The command skips the policies of the `custom.*` constraints that Stage 0
+  declares, because Stage 0 creates those constraints in the same apply.
+- The command also skips every other constraint, including custom
+  constraints of the organization, because Stage 0 does not manage them.
+- The command saves the kept constraints to the `existing_org_policies`
+  answer and keeps the comments in the `answers.yaml` file.
+- The `stellar render` command adds one `import` block for these policies
+  to the `0-bootstrap-imports.tf` file.
+- The first Stage 0 apply passes the `bootstrap_user` variable, so Stage 0
+  manages no organization policies yet and imports none.
+- The final Stage 0 apply omits the `bootstrap_user` variable and imports
+  each listed policy that the regime templates still set.
+- Terraform skips an import once the state holds the policy, so later
+  applies keep working with the same file.
+- Rerun the scan before the final apply when someone changes the
+  organization policies in the meantime.
+- Preflight warns when a policy that Stage 0 declares exists but the
+  `existing_org_policies` answer does not list it.
+- Preflight only counts the existing policies when it runs without an
+  `answers.yaml` file or with the `--redeploy` flag.
+- The CLI rejects an `import_defaults` value of true in the
+  `overrides.0-bootstrap.org_policies_config` answer while the
+  `existing_org_policies` answer lists policies, because that option
+  imports a fixed list of policies whether or not each one exists.
+- The scan also finds the policies that the `import_defaults` option
+  imports, so you can drop that option.
+
+## 8 Run preflight
 
 Preflight only reads from Google Cloud and never changes a resource, so you
 can run it as often as you like.
@@ -221,7 +269,7 @@ uv run --project cli stellar preflight \
 - The command exits with status 1 when a check fails, and the `--strict` flag
   also fails the run on warnings.
 
-## 8 Read the results
+## 9 Read the results
 
 Each check reports one status, and every failure or warning includes a fix
 and a link to the matching documentation.
@@ -234,7 +282,7 @@ and a link to the matching documentation.
 | `manual` | Confirm the prerequisite yourself. |
 | `skip` | Pass the inputs that the check needs. |
 
-## 9 Checks performed
+## 10 Checks performed
 
 Preflight follows the order of the DDG prerequisites section.
 
@@ -279,6 +327,8 @@ Preflight follows the order of the DDG prerequisites section.
   soft-deleted project holds them.
 - Organization-wide custom roles, custom constraints, and log sinks that
   Stage 0 creates do not exist yet.
+- The `existing_org_policies` answer lists every existing organization
+  policy that Stage 0 declares, so the final Stage 0 apply imports it.
 - The organization IAM policy lists every existing grant that the first
   Stage 0 apply removes. For each role that `organization-iam.tf` manages
   authoritatively, preflight compares the current members with the members
@@ -286,7 +336,7 @@ Preflight follows the order of the DDG prerequisites section.
 - Super Admin status, Access Transparency, and project quota appear as manual
   confirmations because no API exposes them to the deploying identity.
 
-## 10 Required access
+## 11 Required access
 
 Preflight needs read access to the resources it checks, which the DDG roles
 already include.
@@ -302,7 +352,7 @@ already include.
 - The `--redeploy` flag downgrades existing prefix resources to warnings when
   you rerun preflight against your own earlier deployment.
 
-## 11 Develop the CLI
+## 12 Develop the CLI
 
 The `cli/` project follows the
 [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)

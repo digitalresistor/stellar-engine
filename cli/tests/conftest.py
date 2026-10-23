@@ -101,6 +101,7 @@ class FakeCloud:
     custom_roles: set = dataclasses.field(default_factory=set)
     constraints: set = dataclasses.field(default_factory=set)
     sinks: set = dataclasses.field(default_factory=set)
+    org_policies: object = dataclasses.field(default_factory=list)
     groups: object = None
     calls: list = dataclasses.field(default_factory=list)
 
@@ -183,6 +184,10 @@ class FakeCloud:
     def log_sink_exists(self, org_id, name):
         return name in self.sinks
 
+    def list_org_policies(self, org_id):
+        self.calls.append(("org_policies", org_id))
+        return sorted(self._value(self.org_policies))
+
     def group_exists(self, email):
         if self.groups is None:
             return True
@@ -223,10 +228,12 @@ def make_ctx(repo, cloud, local_tools):
             "customer_id": CUSTOMER_ID,
         }
         values.update(overrides)
+        # An empty tuple stays, so a test can model answers.yaml with an
+        # empty list.
         values = {
             key: value
             for key, value in values.items()
-            if value or value is False
+            if value or value is False or value == ()
         }
         return checks.Context(
             inputs=inputs_lib.PreflightInputs.model_validate(values),

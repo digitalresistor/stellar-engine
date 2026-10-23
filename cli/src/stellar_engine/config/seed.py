@@ -32,8 +32,10 @@ from stellar_engine import paths
 from stellar_engine.preflight import regions
 
 # Imports name the source environment's own projects, so carrying them
-# would make the new environment adopt projects it does not own.
-NEVER_CARRIED = ("prefix", "engine", "imports")
+# would make the new environment adopt projects it does not own. The
+# existing organization policies describe the source organization as the
+# last scan saw it, so the new environment scans its own.
+NEVER_CARRIED = ("prefix", "engine", "imports", "existing_org_policies")
 
 SUFFIX_LENGTH = 4
 _SUFFIX_CHARS = string.ascii_lowercase + string.digits
@@ -73,11 +75,17 @@ def review_notes(source: dict, target_regime: str | None) -> list[str]:
     """
     notes = []
     # The prefix is always asked again and the engine recorded again, so
-    # only dropped imports need a note.
+    # only the dropped imports and organization policies need a note.
     if source.get("imports"):
         notes.append(
             "the copy drops the imports, because they name resources of "
             "the source environment; add the imports for this one."
+        )
+    if source.get("existing_org_policies"):
+        notes.append(
+            "the copy drops existing_org_policies, because they describe "
+            "the organization of the source environment; run stellar "
+            "imports scan for this one."
         )
     old_regime = _regime(source)
     if not target_regime or target_regime == old_regime:

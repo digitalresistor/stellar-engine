@@ -426,6 +426,7 @@ def test_to_preflight():
                 ".google_project.project[0]": "tst-prod-ten1-iac-core-0",
             },
         },
+        existing_org_policies=["iam.allowedPolicyMemberDomains"],
     )
     values = answers_lib.to_preflight(answers)
     assert values == {
@@ -450,6 +451,7 @@ def test_to_preflight():
             "tst-prod-iac-core-0",
             "tst-prod-ten1-iac-core-0",
         ),
+        "existing_org_policies": ("iam.allowedPolicyMemberDomains",),
     }
 
 

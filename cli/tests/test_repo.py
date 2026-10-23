@@ -18,7 +18,10 @@ These tests read the real checkout. When one fails, the repository changed in
 a way the CLI must follow, or the documentation drifted from the code.
 """
 
+import json
 import re
+import shutil
+import subprocess
 
 import pytest
 
@@ -135,6 +138,170 @@ def test_log_sinks_and_custom_resources(repo):
     assert "audit-logs" in repo.log_sink_names()
     assert "storage_viewer" in repo.custom_role_ids()
     assert "custom.kmsRotation" in repo.custom_constraint_names()
+
+
+# The pattern `0-bootstrap/import.sh` greps for a declared constraint.
+_IMPORT_SH_KEY_RE = re.compile(r"^([^\s#:%-][^:\s]*):", re.MULTILINE)
+
+
+def _import_sh_keys(repo):
+    keys = set()
+    for directory in ("data/org-policies", "data/custom-org-policies"):
+        for path in (repo.bootstrap_dir / directory).rglob("*"):
+            if path.is_file():
+                keys.update(_IMPORT_SH_KEY_RE.findall(path.read_text()))
+    return keys
+
+
+def test_declared_org_policies_match_import_sh(repo):
+    declared = repo.declared_org_policies()
+    assert declared == sorted(set(declared))
+    assert set(declared) == _import_sh_keys(repo)
+
+
+def test_declared_org_policies_read_templated_files(repo):
+    declared = set(repo.declared_org_policies())
+    # Keys from data/custom-org-policies, one behind a regime directive.
+    assert {
+        "iam.allowedPolicyMemberDomains",
+        "compute.managed.restrictProtocolForwardingCreationForTypes",
+        "gcp.resourceLocations",
+    } <= declared
+    # Keys from data/org-policies, including a custom constraint.
+    assert {"compute.skipDefaultNetworkCreation", "custom.kmsRotation"} <= (
+        declared
+    )
+    assert not any(name.startswith(("%", "-")) for name in declared)
+
+
+def test_declared_org_policies_follow_the_file_pattern(tmp_path):
+    bootstrap = tmp_path / repo_lib.BOOTSTRAP_DIR
+    plain = bootstrap / "data/org-policies"
+    templated = bootstrap / "data/custom-org-policies"
+    plain.mkdir(parents=True)
+    templated.mkdir(parents=True)
+    (plain / "a_policy.yaml").write_text("b.one:\n  rules: []\n")
+    (plain / "notes.yaml").write_text("ignored.key: {}\n")
+    (templated / "c_policy.yaml").write_text(
+        "---\n# c.comment:\n%{ if x ~}\nc.two:\n  rules:\n"
+        "  - allow:\n      values:\n        - ${v}\n%{ endif ~}\n"
+    )
+    repo = repo_lib.Repo(tmp_path)
+    assert repo.declared_org_policies() == ["b.one", "c.two"]
+
+
+def test_declared_org_policies_cover_import_defaults(repo):
+    # The `import_defaults` import block in organization.tf lists the
+    # policies of a new organization; the scan must keep each of them.
+    text = (repo.bootstrap_dir / "organization.tf").read_text()
+    block = text.split("var.org_policies_config.import_defaults", 1)[1]
+    block = block.split(": toset([])", 1)[0]
+    listed = re.findall(r'^\s*"([^"]+)",', block, re.MULTILINE)
+    assert listed
+    assert repo.scan_org_policies(listed).kept == tuple(sorted(listed))
+
+
+def test_scan_org_policies(repo):
+    scan = repo.scan_org_policies(
+        [
+            "storage.uniformBucketLevelAccess",
+            "custom.kmsRotation",
+            "unmanaged.constraint",
+            "iam.allowedPolicyMemberDomains",
+            "iam.allowedPolicyMemberDomains",
+        ]
+    )
+    assert scan == repo_lib.OrgPolicyScan(
+        kept=(
+            "iam.allowedPolicyMemberDomains",
+            "storage.uniformBucketLevelAccess",
+        ),
+        custom=("custom.kmsRotation",),
+        undeclared=("unmanaged.constraint",),
+    )
+
+
+def test_scan_org_policies_treat_foreign_custom_as_undeclared(repo):
+    scan = repo.scan_org_policies(["custom.kmsRotation", "custom.myOrgRule"])
+    assert scan.custom == ("custom.kmsRotation",)
+    assert scan.undeclared == ("custom.myOrgRule",)
+
+
+_MODERATE_GATED = "compute.managed.restrictProtocolForwardingCreationForTypes"
+
+
+def test_declared_org_policies_follow_the_regime(repo):
+    every = set(repo.declared_org_policies())
+    moderate = set(repo.declared_org_policies("FEDRAMP_MODERATE"))
+    assert set(repo.declared_org_policies("IL5")) == every
+    assert _MODERATE_GATED in every - moderate
+    # The FedRAMP Moderate branch of an if and else pair still counts.
+    assert "gcp.resourceLocations" in moderate
+    scan = repo.scan_org_policies([_MODERATE_GATED], "FEDRAMP_MODERATE")
+    assert scan.undeclared == (_MODERATE_GATED,)
+
+
+def test_templated_keys_follow_regime_conditions():
+    text = (
+        '%{ if !contains(["A"], regime) ~}\nnot.a: 1\n%{ else ~}\n'
+        'only.a: 1\n%{ endif ~}\n%{ if contains(["B", "C"], regime) ~}\n'
+        "b.or.c: 1\n%{ endif ~}\n%{ if other ~}\nunknown: 1\n%{ endif ~}\n"
+        "%{ for d in ds ~}\n- ${d}\n%{ endfor ~}\nalways: 1\n"
+    )
+    assert repo_lib._templated_keys(text, "A") == {
+        "only.a",
+        "unknown",
+        "always",
+    }
+    assert repo_lib._templated_keys(text, "B") == {
+        "not.a",
+        "b.or.c",
+        "unknown",
+        "always",
+    }
+    assert repo_lib._templated_keys(text, None) == {
+        "not.a",
+        "only.a",
+        "b.or.c",
+        "unknown",
+        "always",
+    }
+
+
+_TEMPLATE_VARS = (
+    'organization_id = "1", domain_name = "example.com", '
+    'customer_id = "C0", drs_tag_name = "x/y", allowed_domains = ["C0"]'
+)
+
+
+@pytest.mark.terraform
+@pytest.mark.skipif(
+    shutil.which("terraform") is None, reason="terraform is missing"
+)
+@pytest.mark.parametrize("regime", ["FEDRAMP_MODERATE", "IL5"])
+def test_templated_keys_match_templatefile(repo, regime, tmp_path):
+    # Sync test: Terraform renders the templated files the way
+    # `local._org_policies_raw` does, and the keys must match ours.
+    directory = repo.bootstrap_dir / "data/custom-org-policies"
+    expression = (
+        "jsonencode(sort(flatten([for f in fileset("
+        f'"{directory}", "*_policy.yaml") : try(keys(yamldecode('
+        f'templatefile("{directory}/${{f}}", {{{_TEMPLATE_VARS}, '
+        f'regime = "{regime}"}}))), [])])))'
+    )
+    console = subprocess.run(
+        ["terraform", f"-chdir={tmp_path}", "console", "-no-color"],
+        input=expression,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert console.returncode == 0, console.stderr
+    rendered = set(json.loads(json.loads(console.stdout)))
+    ours = set()
+    for path in directory.glob("*_policy.yaml"):
+        ours |= repo_lib._templated_keys(path.read_text(), regime)
+    assert rendered == ours
 
 
 def test_authoritative_roles(repo):
