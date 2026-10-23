@@ -198,3 +198,36 @@ def test_visible_project_state_queries_soft_deleted(monkeypatch):
         "id:abc-prod-iac-core-0",
         "id:abc-prod-iac-core-0 state:DELETE_REQUESTED",
     ]
+
+
+class _Account:
+    def __init__(self, name, is_open):
+        self.name = name
+        self.open_ = is_open
+
+
+def test_list_billing_accounts(monkeypatch):
+    class Billing:
+        def list_billing_accounts(self):
+            return [
+                _Account("billingAccounts/000000-AAAAAA-BBBBBB", True),
+                _Account("billingAccounts/111111-AAAAAA-BBBBBB", False),
+            ]
+
+    cloud = live.LiveCloudApi()
+    monkeypatch.setitem(cloud.__dict__, "_billing", Billing())
+    assert cloud.list_billing_accounts() == [
+        api.BillingAccount("000000-AAAAAA-BBBBBB", True),
+        api.BillingAccount("111111-AAAAAA-BBBBBB", False),
+    ]
+
+
+def test_list_billing_accounts_translates_errors(monkeypatch):
+    class Billing:
+        def list_billing_accounts(self):
+            raise api_exceptions.PermissionDenied("no billing access")
+
+    cloud = live.LiveCloudApi()
+    monkeypatch.setitem(cloud.__dict__, "_billing", Billing())
+    with pytest.raises(api.AccessDeniedError, match="no billing access"):
+        cloud.list_billing_accounts()

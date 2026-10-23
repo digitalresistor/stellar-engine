@@ -172,6 +172,10 @@ class CloudApi(Protocol):
         """Returns a billing account by ID."""
         ...
 
+    def list_billing_accounts(self) -> list[BillingAccount]:
+        """Returns the billing accounts visible to the caller."""
+        ...
+
     def granted_billing_permissions(
         self, account_id: str, permissions: list[str]
     ) -> set[str]:

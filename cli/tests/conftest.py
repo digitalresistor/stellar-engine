@@ -58,6 +58,9 @@ class FakeTools:
     def jq_version(self):
         return self.jq
 
+    def terraform_fmt(self, text):
+        return None
+
 
 @dataclasses.dataclass
 class FakeCloud:
@@ -82,6 +85,9 @@ class FakeCloud:
     bindings: list = dataclasses.field(default_factory=list)
     billing_account: object = dataclasses.field(
         default_factory=lambda: api.BillingAccount(BILLING, True)
+    )
+    billing_accounts: object = dataclasses.field(
+        default_factory=lambda: [api.BillingAccount(BILLING, True)]
     )
     project_link: object = dataclasses.field(
         default_factory=lambda: api.ProjectBilling(BILLING, True)
@@ -143,6 +149,9 @@ class FakeCloud:
 
     def get_billing_account(self, account_id):
         return self._value(self.billing_account)
+
+    def list_billing_accounts(self):
+        return self._value(self.billing_accounts)
 
     def project_billing(self, project_id):
         return self._value(self.project_link)
@@ -214,7 +223,11 @@ def make_ctx(repo, cloud, local_tools):
             "customer_id": CUSTOMER_ID,
         }
         values.update(overrides)
-        values = {key: value for key, value in values.items() if value}
+        values = {
+            key: value
+            for key, value in values.items()
+            if value or value is False
+        }
         return checks.Context(
             inputs=inputs_lib.PreflightInputs.model_validate(values),
             cloud=cloud,
