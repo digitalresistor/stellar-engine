@@ -2,7 +2,9 @@
 
 The `stellar` command verifies that your workstation, identity, and Google
 Cloud organization meet the prerequisites in the
-[Detailed Deployment Guide](../docs/ddg.md) before you deploy Stage 0.
+[Detailed Deployment Guide](../docs/ddg.md) before you deploy Stage 0. It
+also records the answers of each deployment and renders ready-to-run
+Terraform workspaces for the `0-bootstrap` and `1-resman` stages.
 
 ## 1 Install the CLI
 
@@ -17,7 +19,177 @@ do not install Python yourself.
 - Install the command on your `PATH` with `uv tool install ./cli` if you
   prefer to run `stellar` directly.
 
-## 2 Run preflight
+## 2 Choose a home
+
+One home folder holds every file that a deployment owns, so you move or back
+up a deployment by moving one folder.
+
+- The `--home` flag selects the home for one command.
+- The `STELLAR_HOME` environment variable selects the home when you omit the
+  `--home` flag, for example `STELLAR_HOME=~/deployments/lab`.
+- Without either setting, the command uses the `.stellar/` folder in the
+  engine checkout, which the root `.gitignore` file excludes.
+- Every command resolves the home the same way, and `stellar env show`
+  prints the home and the setting that selected it.
+- A home can live outside the checkout, because workspaces link to the
+  engine code with absolute paths.
+- One checkout can serve many homes, such as one home per organization.
+
+Each environment lives in the `envs/<prefix>/` folder of the home.
+
+- The `answers.yaml` file records the answers and keeps your comments
+  across reruns.
+- Only your user can read the `answers.yaml` file, because it names
+  principals and billing accounts.
+- The `fast/stages-aw/<stage>/` folders hold the stage workspaces.
+- The `fast-config/` folder receives the provider and tfvars files that
+  Stage 0 writes for later stages.
+- The `generated/` folder stores a hash of each tfvars file that
+  `stellar render` wrote, so the next render detects manual edits.
+- The `.gitignore` file of the home tracks only the answers files, so you
+  can turn the home into a private Git repository without committing state,
+  logs, or plans.
+
+## 3 Create an environment
+
+The `stellar init` command validates every answer against the repository
+before it saves the `answers.yaml` file, so mistakes surface before
+Terraform runs.
+
+```bash
+uv run --project cli stellar init
+```
+
+- The wizard offers the organizations and billing accounts that your
+  credentials can see as defaults.
+- The `--offline` flag skips those Google Cloud lookups.
+- A rerun keeps the current answers as defaults, so you press Enter to keep
+  each one.
+- The `--section` flag asks only the named wizard section, such as
+  `--section tenants`, and accepts repeats.
+- The `--set KEY=VALUE` flag sets one answer and accepts repeats.
+- Each `--set` value is YAML, so lists and maps work.
+- The `--non-interactive` flag never prompts and exits with status 2 when an
+  answer is missing or invalid.
+- The `--from-config-env scripts/config.env` flag starts a new environment
+  from an existing `scripts/deploy.sh` configuration file.
+- The `overrides` answer passes raw tfvars values per stage for variables
+  that the answers do not model, such as the Stage 0 `iam` map.
+- The command rejects an override of a variable that the stage does not
+  declare or that the Stage 0 outputs provide.
+- The command also rejects an override of a value that the CLI derives,
+  such as `prefix`, `outputs_location`, or `bootstrap_user`.
+- A rerun never changes the prefix of an environment, so use the
+  `--answers-from` flag to start a new environment from it.
+
+```bash
+uv run --project cli stellar init --non-interactive --prefix abc \
+  --set organization.id=123456789012 \
+  --set organization.domain=example.com \
+  --set organization.customer_id=C01234567 \
+  --set billing.account_id=000000-AAAAAA-BBBBBB \
+  --set bootstrap_project=my-bootstrap-project \
+  --set region=us-east4 \
+  --set compliance.regime=IL5 \
+  --set alert_email=alerts@example.com \
+  --set bootstrap_user=admin@example.com \
+  --set 'resman.tenants.ten1={descriptive_name: tenant-1}'
+```
+
+A new environment can start from the answers of another one, so most
+prompts only need Enter.
+
+- The `--answers-from` flag copies the organization, billing, groups, and
+  tenants from another environment prefix or an `answers.yaml` path.
+- The copy never includes the prefix, the engine path, or the imports,
+  because those belong to the source environment.
+- The command lists the answers to review when the regime changes, such as
+  an explicit `kms_protection_level` value.
+- The `--new-prefix` flag suggests a fresh prefix with a random suffix, so
+  the new project IDs avoid the IDs of a recently deleted deployment.
+
+## 4 Manage environments
+
+Each prefix in a home is one environment, and every command that omits the
+`--prefix` flag works on the current environment.
+
+- The `stellar env list` command shows each environment with its regime,
+  region, and organization, and marks the current one.
+- The `stellar env use PREFIX` command makes another environment current.
+- The `stellar env show` command prints the home, the answers file, the
+  workspaces, and the values that the CLI derives, such as the KMS
+  protection level and the project IDs.
+- The `STELLAR_PREFIX` environment variable selects an environment the same
+  way as the `--prefix` flag.
+- Every command stops when the current environment no longer exists and
+  points you to the `stellar env use PREFIX` command.
+- Every command stops when the `prefix` answer differs from the name of the
+  environment folder.
+
+## 5 Render the workspaces
+
+The `stellar render` command turns the answers into one Terraform workspace
+per stage, so you run Terraform with the `-chdir` option and never edit the
+engine checkout. The command prints the `terraform -chdir` lines for each
+stage, so you can copy them. With the default home, they look like this.
+
+```bash
+uv run --project cli stellar render
+terraform -chdir=.stellar/envs/abc/fast/stages-aw/0-bootstrap init
+terraform -chdir=.stellar/envs/abc/fast/stages-aw/0-bootstrap plan \
+  -var bootstrap_user=admin@example.com
+```
+
+- Each workspace links the stage files of the engine and keeps the files
+  that the environment owns, such as `terraform.tfvars` and the local state.
+- The Stage 0 workspace receives a copy of the `providers.tf.tmp` file as
+  `0-bootstrap-providers.tf`, as the DDG instructs.
+- Later renders keep the `0-bootstrap-providers.tf` file, because the state
+  migration step replaces it with the remote providers file.
+- The `1-resman` workspace links the Stage 0 outputs from the `fast-config/`
+  folder once Stage 0 writes them.
+- The `--stage` flag renders one stage, such as `--stage 0`, and accepts
+  repeats.
+- The `--diff` flag prints the changes and writes nothing.
+- A rerun replaces a tfvars file silently only when the file still matches
+  the last render.
+- The command asks before it replaces a tfvars file that holds manual edits,
+  and exits with status 3 when it cannot ask.
+- The `--force` flag replaces an edited file after it saves a
+  `terraform.tfvars.backup.<timestamp>` copy.
+- The tfvars file never sets the `bootstrap_user` variable, because the DDG
+  passes it with the `-var` option on the first Stage 0 apply.
+
+## 6 Adopt existing projects
+
+Terraform import blocks adopt Stage 0 projects that an administrator creates
+in advance, so Stage 0 moves them into its folders instead of creating them
+and linking billing again.
+
+```yaml
+imports:
+  0-bootstrap:
+    module.automation-project.google_project.project[0]: abc-prod-iac-core-0
+    module.log-export-project.google_project.project[0]: abc-prod-audit-logs-0
+```
+
+- The `stellar render` command writes one `import` block per entry to the
+  `0-bootstrap-imports.tf` file in the workspace.
+- The command removes that file when the `imports` map becomes empty.
+- The bootstrap section of the wizard asks whether the Stage 0 projects
+  exist already and reads their addresses from the stage code.
+- Each Stage 0 import ID must equal the project ID that the prefix
+  derives, because a different ID makes Terraform replace the imported
+  project.
+- The `module.billing-export-project[0]` address exists only when
+  `billing.no_iam` is false and `billing.is_org_level` is true, so the
+  command warns about an import into it otherwise.
+- Preflight expects each project in the `imports` map to exist and be
+  active, and reports it as a pass instead of a name collision.
+- The `--set` flag accepts an address in double quotes, such as
+  `--set 'imports.0-bootstrap."module.automation-project.google_project.project[0]"=abc-prod-iac-core-0'`.
+
+## 7 Run preflight
 
 Preflight only reads from Google Cloud and never changes a resource, so you
 can run it as often as you like.
@@ -38,6 +210,9 @@ uv run --project cli stellar preflight \
   the `--org` flag.
 - The `--config-env scripts/config.env` flag reads values from an existing
   `scripts/deploy.sh` configuration file, and explicit flags override it.
+- Preflight reads unset values from the answers of the current environment,
+  or of the environment that the `--prefix` flag selects, and explicit flags
+  override them.
 - The `--group gcp-devops=platform-ops` flag checks a renamed Stage 0 group
   and accepts repeats.
 - A check whose inputs you omit reports `skip` and names the flag that
@@ -46,7 +221,7 @@ uv run --project cli stellar preflight \
 - The command exits with status 1 when a check fails, and the `--strict` flag
   also fails the run on warnings.
 
-## 3 Read the results
+## 8 Read the results
 
 Each check reports one status, and every failure or warning includes a fix
 and a link to the matching documentation.
@@ -59,7 +234,7 @@ and a link to the matching documentation.
 | `manual` | Confirm the prerequisite yourself. |
 | `skip` | Pass the inputs that the check needs. |
 
-## 4 Checks performed
+## 9 Checks performed
 
 Preflight follows the order of the DDG prerequisites section.
 
@@ -97,6 +272,11 @@ Preflight follows the order of the DDG prerequisites section.
   folder that Stage 0 creates already exists with that prefix.
 - No soft-deleted project still holds a project ID that Stage 0 creates,
   because a deleted project keeps its ID for 30 days.
+- The naming checks skip the billing export project unless the
+  `billing.no_iam` answer is false and the `billing.is_org_level` answer is
+  true, because Stage 0 creates it only then.
+- The Stage 1 tenant project IDs from the answers are free and no
+  soft-deleted project holds them.
 - Organization-wide custom roles, custom constraints, and log sinks that
   Stage 0 creates do not exist yet.
 - The organization IAM policy lists every existing grant that the first
@@ -106,7 +286,7 @@ Preflight follows the order of the DDG prerequisites section.
 - Super Admin status, Access Transparency, and project quota appear as manual
   confirmations because no API exposes them to the deploying identity.
 
-## 5 Required access
+## 10 Required access
 
 Preflight needs read access to the resources it checks, which the DDG roles
 already include.
@@ -122,7 +302,7 @@ already include.
 - The `--redeploy` flag downgrades existing prefix resources to warnings when
   you rerun preflight against your own earlier deployment.
 
-## 6 Develop the CLI
+## 11 Develop the CLI
 
 The `cli/` project follows the
 [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)
@@ -135,5 +315,7 @@ with the ruff settings in `cli/pyproject.toml`.
 - Check types with `uv run pyright`.
 - Unit tests replace Google Cloud with in-memory fakes, so they never touch
   the network.
+- Tests marked `terraform` run the real Terraform binary and skip when it
+  is missing.
 - Sync tests in `cli/tests/test_repo.py` read the repository and the DDG, so
   they fail when the documentation and the code drift apart.

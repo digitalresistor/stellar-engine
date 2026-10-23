@@ -15,13 +15,20 @@
 """Tests for the `stellar` command line."""
 
 import json
+import os
+import pathlib
+import shutil
+import stat
+import subprocess
 
 import pytest
+from ruamel import yaml
 from typer import testing
 
 import conftest
 import stellar_engine
 from stellar_engine import cli
+from stellar_engine.config import answers as answers_lib
 
 BASE_ARGS = [
     "preflight",
@@ -42,13 +49,21 @@ BASE_ARGS = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    """Points every command at a temp home outside the repository."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("STELLAR_HOME", str(home))
+    monkeypatch.delenv("STELLAR_PREFIX", raising=False)
+    return home
+
+
 @pytest.fixture
 def fake_cloud(monkeypatch):
     cloud = conftest.FakeCloud()
     monkeypatch.setattr(cli.live, "LiveCloudApi", lambda: cloud)
     monkeypatch.setattr(cli.tools_lib, "SystemTools", conftest.FakeTools)
-    for name in ("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", "STELLAR_PREFIX"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", raising=False)
     return cloud
 
 
@@ -167,3 +182,732 @@ def test_service_account_with_bootstrap_user(runner, fake_cloud):
     checks_by_id = {c["check_id"]: c for c in document["checks"]}
     assert checks_by_id["identity.bootstrap_user"]["status"] == "pass"
     assert document["inputs"]["bootstrap_user"] == "admin@example.com"
+
+
+# Answers for a complete IL5 environment, as `init --set` assignments.
+REQUIRED_SETS = [
+    f"organization.id={conftest.ORG_ID}",
+    f"organization.domain={conftest.DOMAIN}",
+    f"organization.customer_id={conftest.CUSTOMER_ID}",
+    f"billing.account_id={conftest.BILLING}",
+    f"bootstrap_project={conftest.PROJECT}",
+    "region=us-east4",
+    "compliance.regime=IL5",
+    "alert_email=alerts@example.com",
+    "bootstrap_user=admin@example.com",
+]
+IAC_CORE = "module.automation-project.google_project.project[0]"
+AUDIT_LOGS = "module.log-export-project.google_project.project[0]"
+BILLING_EXPORT = "module.billing-export-project[0].google_project.project[0]"
+
+
+def _sets(*assignments):
+    args = []
+    for assignment in [*REQUIRED_SETS, *assignments]:
+        args += ["--set", assignment]
+    return args
+
+
+def _init(runner, prefix: str | None = "tst", *extra, sets=()):
+    args = [
+        "init",
+        "--non-interactive",
+        "--repo",
+        str(conftest.REPO_ROOT),
+        *(["--prefix", prefix] if prefix else []),
+        *_sets(*sets),
+        *extra,
+    ]
+    return runner.invoke(cli.app, args)
+
+
+def _invoke(runner, *args):
+    return runner.invoke(cli.app, [*args, "--repo", str(conftest.REPO_ROOT)])
+
+
+def _answers(home, prefix="tst"):
+    return answers_lib.load(home / "envs" / prefix / "answers.yaml")
+
+
+def _workspace(home, stage, prefix="tst"):
+    return home / "envs" / prefix / "fast" / "stages-aw" / stage
+
+
+@pytest.fixture
+def fake_tools(monkeypatch):
+    monkeypatch.setattr(cli.tools_lib, "SystemTools", conftest.FakeTools)
+
+
+def test_init_non_interactive_with_sets(runner, isolated_home):
+    outcome = _init(
+        runner,
+        sets=(
+            "billing.no_iam=true",
+            "org_policies.allowed_policy_member_domains=[is:C0AAAAAAA, "
+            '"is:principalSet://iam.googleapis.com/organizations/'
+            f'{conftest.ORG_ID}"]',
+            "resman.tenants.ten1={descriptive_name: tenant-1}",
+            f'imports.0-bootstrap."{IAC_CORE}"=tst-prod-iac-core-0',
+            'overrides.0-bootstrap.iam={"roles/viewer": '
+            '["user:admin@example.com"]}',
+        ),
+    )
+    assert outcome.exit_code == 0, outcome.output
+    answers = _answers(isolated_home)
+    assert answers.organization.id == conftest.ORG_ID
+    assert answers.billing.no_iam is True
+    assert answers.org_policies.allowed_policy_member_domains[1].startswith(
+        "is:principalSet://"
+    )
+    assert answers.resman.tenants["ten1"].descriptive_name == "tenant-1"
+    assert answers.imports == {"0-bootstrap": {IAC_CORE: "tst-prod-iac-core-0"}}
+    assert answers.overrides["0-bootstrap"]["iam"] == {
+        "roles/viewer": ["user:admin@example.com"]
+    }
+    assert answers.engine is not None
+    assert answers.engine.path == str(conftest.REPO_ROOT)
+    path = isolated_home / "envs" / "tst" / "answers.yaml"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert (isolated_home / "answers.schema.json").is_file()
+    assert (isolated_home / ".gitignore").is_file()
+    assert (isolated_home / "current").read_text().strip() == "tst"
+    assert "Next: stellar render" in outcome.output
+
+
+def test_init_reports_every_problem(runner, isolated_home):
+    outcome = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--non-interactive",
+            "--prefix",
+            "tst",
+            "--set",
+            "region=us-east4",
+            "--repo",
+            str(conftest.REPO_ROOT),
+        ],
+    )
+    assert outcome.exit_code == 2
+    for field in ("organization", "billing", "compliance", "alert_email"):
+        assert field in outcome.output
+    assert not (isolated_home / "envs" / "tst").exists()
+
+
+def test_init_rejects_repo_rules(runner, isolated_home):
+    outcome = _init(runner, sets=("region=europe-west1",))
+    assert outcome.exit_code == 2
+    assert "region europe-west1" in outcome.output
+
+
+def test_init_malformed_set_exits_2(runner):
+    outcome = _init(runner, sets=("nonsense",))
+    assert outcome.exit_code == 2
+    assert "KEY=VALUE" in outcome.output
+
+
+def test_section_needs_interactive(runner):
+    outcome = _init(runner, "tst", "--section", "groups")
+    assert outcome.exit_code == 2
+    assert "interactive" in outcome.output
+
+
+def test_init_rerun_keeps_comments(runner, isolated_home):
+    assert _init(runner).exit_code == 0
+    path = isolated_home / "envs" / "tst" / "answers.yaml"
+    text = path.read_text().replace(
+        "region: us-east4", "# Closest to the operators.\nregion: us-east4"
+    )
+    path.write_text(text)
+    outcome = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--non-interactive",
+            "--set",
+            "budget.amount=100",
+            "--repo",
+            str(conftest.REPO_ROOT),
+        ],
+    )
+    assert outcome.exit_code == 0, outcome.output
+    saved = path.read_text()
+    assert "# Closest to the operators.\nregion: us-east4" in saved
+    assert _answers(isolated_home).budget.amount == 100
+
+
+def test_init_refuses_to_replace_another_env(runner):
+    assert _init(runner).exit_code == 0
+    outcome = _init(runner, None, "--answers-from", "tst", sets=("prefix=tst",))
+    assert outcome.exit_code == 2
+    assert "already exists" in outcome.output
+
+
+def test_answers_from_seeds_and_notes_regime_change(runner, isolated_home):
+    first = _init(
+        runner,
+        sets=(
+            "kms_protection_level=HSM",
+            f'imports.0-bootstrap."{IAC_CORE}"=tst-prod-iac-core-0',
+        ),
+    )
+    assert first.exit_code == 0, first.output
+    outcome = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--non-interactive",
+            "--prefix",
+            "new",
+            "--answers-from",
+            "tst",
+            "--set",
+            "compliance.regime=FEDRAMP_MODERATE",
+            "--repo",
+            str(conftest.REPO_ROOT),
+        ],
+    )
+    assert outcome.exit_code == 0, outcome.output
+    assert "Seeding from" in outcome.output
+    assert "kms_protection_level HSM is explicit" in outcome.output
+    assert "the copy drops the imports" in outcome.output
+    seeded = _answers(isolated_home, "new")
+    assert seeded.prefix == "new"
+    assert seeded.organization.domain == conftest.DOMAIN
+    assert seeded.compliance.regime == "FEDRAMP_MODERATE"
+    assert seeded.imports == {}
+    assert (isolated_home / "current").read_text().strip() == "new"
+
+
+def test_answers_from_a_file(runner, isolated_home, tmp_path):
+    assert _init(runner).exit_code == 0
+    source = tmp_path / "elsewhere.yaml"
+    source.write_text(
+        (isolated_home / "envs" / "tst" / "answers.yaml").read_text()
+    )
+    outcome = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--non-interactive",
+            "--prefix",
+            "oth",
+            "--answers-from",
+            str(source),
+            "--repo",
+            str(conftest.REPO_ROOT),
+        ],
+    )
+    assert outcome.exit_code == 0, outcome.output
+    assert _answers(isolated_home, "oth").region == "us-east4"
+
+
+def test_new_prefix_suggests_one(runner, isolated_home):
+    assert _init(runner).exit_code == 0
+    outcome = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--non-interactive",
+            "--answers-from",
+            "tst",
+            "--new-prefix",
+            "--repo",
+            str(conftest.REPO_ROOT),
+        ],
+    )
+    assert outcome.exit_code == 0, outcome.output
+    current = (isolated_home / "current").read_text().strip()
+    assert current != "tst"
+    assert current.startswith("tst")
+    assert len(current) <= 7
+    assert f"Suggested prefix {current}." in outcome.output
+    assert _answers(isolated_home, current).prefix == current
+
+
+def test_interactive_init_runs_the_wizard(runner, isolated_home, monkeypatch):
+    calls = {}
+
+    def fake_run(data, *, prompter, repo, discovered, sections):
+        calls["sections"] = sections
+        calls["discovered"] = discovered
+        return {**data, "alert_email": "wizard@example.com"}
+
+    monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
+    monkeypatch.setattr(cli.flow, "run", fake_run)
+    monkeypatch.setattr(cli.tools_lib, "SystemTools", conftest.FakeTools)
+    outcome = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--prefix",
+            "tst",
+            "--offline",
+            "--section",
+            "contacts",
+            *_sets(),
+            "--repo",
+            str(conftest.REPO_ROOT),
+        ],
+    )
+    assert outcome.exit_code == 0, outcome.output
+    assert calls["sections"] == ["contacts"]
+    assert calls["discovered"].organizations == ()
+    assert calls["discovered"].gcloud_account == conftest.USER
+    assert _answers(isolated_home).alert_email == "wizard@example.com"
+
+
+def test_env_list_use_show(runner, isolated_home):
+    assert _init(runner, "aaa").exit_code == 0
+    assert _init(runner, "bbb", sets=("compliance.regime=IL4",)).exit_code == 0
+    listing = _invoke(runner, "env", "list")
+    assert listing.exit_code == 0, listing.output
+    assert "aaa" in listing.output
+    assert "IL4" in listing.output
+    lines = [line for line in listing.output.splitlines() if "bbb" in line]
+    assert "*" in lines[0]
+
+    use = _invoke(runner, "env", "use", "aaa")
+    assert use.exit_code == 0, use.output
+    assert (isolated_home / "current").read_text().strip() == "aaa"
+    assert _invoke(runner, "env", "use", "zzz").exit_code == 2
+
+    show = _invoke(runner, "env", "show")
+    assert show.exit_code == 0, show.output
+    assert f"Home: {isolated_home} (from STELLAR_HOME)" in show.output
+    assert "Environment: aaa (current)" in show.output
+    assert "KMS protection level: HSM" in show.output
+    assert "aaa-prod-iac-core-0" in show.output
+    other = _invoke(runner, "env", "show", "--prefix", "bbb")
+    assert "Environment: bbb\n" in other.output
+
+
+def test_env_list_without_envs(runner, isolated_home):
+    outcome = _invoke(runner, "env", "list")
+    assert outcome.exit_code == 0
+    assert "No environments" in outcome.output
+
+
+def test_env_show_without_env_exits_2(runner):
+    outcome = _invoke(runner, "env", "show")
+    assert outcome.exit_code == 2
+    assert "stellar init" in outcome.output
+
+
+def test_home_from_flag_wins(runner, isolated_home, tmp_path):
+    flagged = tmp_path / "flagged"
+    outcome = _init(runner, "tst", "--home", str(flagged))
+    assert outcome.exit_code == 0, outcome.output
+    assert (flagged / "envs" / "tst" / "answers.yaml").is_file()
+    assert not isolated_home.exists()
+    show = _invoke(runner, "env", "show", "--home", str(flagged))
+    assert f"Home: {flagged} (from the --home flag)" in show.output
+
+
+def _engine_copy(tmp_path):
+    """Links the repository's top-level entries into a fresh engine root.
+
+    The default home lives inside the engine checkout, so the test needs a
+    checkout it may write into.
+    """
+    engine = tmp_path / "engine"
+    engine.mkdir()
+    for entry in conftest.REPO_ROOT.iterdir():
+        if entry.name not in (".git", ".stellar"):
+            (engine / entry.name).symlink_to(entry)
+    return engine
+
+
+def test_home_defaults_into_the_engine(runner, tmp_path, monkeypatch):
+    monkeypatch.delenv("STELLAR_HOME")
+    engine = _engine_copy(tmp_path)
+    args = ["--repo", str(engine)]
+    outcome = runner.invoke(
+        cli.app,
+        ["init", "--non-interactive", "--prefix", "tst", *_sets(), *args],
+    )
+    assert outcome.exit_code == 0, outcome.output
+    home = engine / ".stellar"
+    assert (home / "envs" / "tst" / "answers.yaml").is_file()
+    show = runner.invoke(cli.app, ["env", "show", *args])
+    assert f"Home: {home} (default inside the engine checkout)" in show.output
+
+
+def test_render_creates_workspace_tfvars_and_imports(
+    runner, isolated_home, fake_tools
+):
+    assert (
+        _init(
+            runner,
+            sets=(f'imports.0-bootstrap."{IAC_CORE}"=tst-prod-iac-core-0',),
+        ).exit_code
+        == 0
+    )
+    outcome = _invoke(runner, "render")
+    assert outcome.exit_code == 0, outcome.output
+    workspace = _workspace(isolated_home, "0-bootstrap")
+    tfvars = workspace / "terraform.tfvars"
+    assert 'prefix = "tst"' in tfvars.read_text()
+    assert stat.S_IMODE(tfvars.stat().st_mode) == 0o600
+    imports_file = workspace / "0-bootstrap-imports.tf"
+    assert "tst-prod-iac-core-0" in imports_file.read_text()
+    assert (workspace / "main.tf").is_symlink()
+    # The home lives outside the repository, so the links are absolute.
+    target = pathlib.Path(os.readlink(workspace / "main.tf"))
+    assert target.is_absolute()
+    assert target.is_relative_to(conftest.REPO_ROOT)
+    assert (workspace / "0-bootstrap-providers.tf").is_file()
+    assert (
+        _workspace(isolated_home, "1-resman") / "terraform.tfvars"
+    ).is_file()
+    assert f"created    {tfvars}" in outcome.output
+    assert f"created    {imports_file}" in outcome.output
+    assert f"terraform -chdir={workspace} init" in outcome.output
+    assert (
+        f"terraform -chdir={workspace} plan -var bootstrap_user="
+        "admin@example.com"
+    ) in outcome.output
+    assert "1-resman waits for Stage 0 outputs" in outcome.output
+
+
+def test_render_rerun_is_unchanged(runner, isolated_home, fake_tools):
+    assert _init(runner).exit_code == 0
+    assert _invoke(runner, "render").exit_code == 0
+    again = _invoke(runner, "render")
+    assert again.exit_code == 0, again.output
+    assert "created" not in again.output
+    assert again.output.count("  unchanged  ") == 2
+
+
+def test_render_one_stage_by_alias(runner, isolated_home, fake_tools):
+    assert _init(runner).exit_code == 0
+    outcome = _invoke(runner, "render", "--stage", "0")
+    assert outcome.exit_code == 0, outcome.output
+    assert (
+        _workspace(isolated_home, "0-bootstrap") / "terraform.tfvars"
+    ).exists()
+    assert not _workspace(isolated_home, "1-resman").exists()
+    assert _invoke(runner, "render", "--stage", "9").exit_code == 2
+
+
+def test_render_removes_dropped_imports(runner, isolated_home, fake_tools):
+    assert (
+        _init(
+            runner,
+            sets=(f'imports.0-bootstrap."{IAC_CORE}"=tst-prod-iac-core-0',),
+        ).exit_code
+        == 0
+    )
+    assert _invoke(runner, "render").exit_code == 0
+    rerun = _invoke(runner, "init", "--non-interactive", "--set", "imports={}")
+    assert rerun.exit_code == 0, rerun.output
+    outcome = _invoke(runner, "render")
+    imports_file = _workspace(isolated_home, "0-bootstrap") / (
+        "0-bootstrap-imports.tf"
+    )
+    assert f"removed    {imports_file}" in outcome.output
+    assert not imports_file.exists()
+
+
+def test_render_warns_on_billing_export_import(
+    runner, isolated_home, fake_tools
+):
+    outcome = _init(
+        runner,
+        sets=(
+            "billing.no_iam=true",
+            f'imports.0-bootstrap."{BILLING_EXPORT}"=tst-prod-billing-exp-0',
+        ),
+    )
+    assert outcome.exit_code == 0, outcome.output
+    assert "Warning: imports.0-bootstrap" in outcome.output
+    rendered = _invoke(runner, "render")
+    assert rendered.exit_code == 0
+    assert "billing export project" in rendered.output
+
+
+def test_render_manual_edit_exits_3(runner, isolated_home, fake_tools):
+    assert _init(runner).exit_code == 0
+    assert _invoke(runner, "render").exit_code == 0
+    tfvars = _workspace(isolated_home, "0-bootstrap") / "terraform.tfvars"
+    edited = tfvars.read_text() + "# operator note\n"
+    tfvars.write_text(edited)
+    outcome = _invoke(runner, "render")
+    assert outcome.exit_code == 3
+    assert "manual edits" in outcome.output
+    assert tfvars.read_text() == edited
+    # The other stage still renders.
+    assert "1-resman     unchanged" in outcome.output
+
+
+def test_render_force_backs_up(runner, isolated_home, fake_tools):
+    assert _init(runner).exit_code == 0
+    assert _invoke(runner, "render").exit_code == 0
+    workspace = _workspace(isolated_home, "0-bootstrap")
+    tfvars = workspace / "terraform.tfvars"
+    rendered = tfvars.read_text()
+    tfvars.write_text(rendered + "# operator note\n")
+    outcome = _invoke(runner, "render", "--force")
+    assert outcome.exit_code == 0, outcome.output
+    assert tfvars.read_text() == rendered
+    backups = list(workspace.glob("terraform.tfvars.backup.*"))
+    assert len(backups) == 1
+    assert backups[0].read_text().endswith("# operator note\n")
+    assert f"backup {backups[0]}" in outcome.output
+
+
+def test_render_interactive_confirm(
+    runner, isolated_home, fake_tools, monkeypatch
+):
+    assert _init(runner).exit_code == 0
+    assert _invoke(runner, "render").exit_code == 0
+    tfvars = _workspace(isolated_home, "0-bootstrap") / "terraform.tfvars"
+    tfvars.write_text(tfvars.read_text() + "# operator note\n")
+    monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
+    declined = runner.invoke(
+        cli.app,
+        ["render", "--stage", "0", "--repo", str(conftest.REPO_ROOT)],
+        input="n\n",
+    )
+    assert declined.exit_code == 0, declined.output
+    assert "skipped" in declined.output
+    assert tfvars.read_text().endswith("# operator note\n")
+    accepted = runner.invoke(
+        cli.app,
+        ["render", "--stage", "0", "--repo", str(conftest.REPO_ROOT)],
+        input="y\n",
+    )
+    assert accepted.exit_code == 0, accepted.output
+    assert not tfvars.read_text().endswith("# operator note\n")
+
+
+def test_render_diff_writes_nothing(runner, isolated_home, fake_tools):
+    assert _init(runner).exit_code == 0
+    outcome = _invoke(runner, "render", "--diff")
+    assert outcome.exit_code == 0, outcome.output
+    assert '+prefix = "tst"' in outcome.output
+    assert (
+        not (isolated_home / "envs" / "tst" / "fast" / "stages-aw")
+        .joinpath("0-bootstrap", "terraform.tfvars")
+        .exists()
+    )
+    assert _invoke(runner, "render").exit_code == 0
+    assert "No changes." in _invoke(runner, "render", "--diff").output
+
+
+def test_render_without_answers_exits_2(runner):
+    outcome = _invoke(runner, "render", "--prefix", "nope")
+    assert outcome.exit_code == 2
+    assert "stellar init --prefix nope" in outcome.output
+
+
+def test_render_invalid_answers_exit_2(runner, isolated_home):
+    assert _init(runner).exit_code == 0
+    path = isolated_home / "envs" / "tst" / "answers.yaml"
+    path.write_text(path.read_text().replace("IL5", "PCI"))
+    outcome = _invoke(runner, "render")
+    assert outcome.exit_code == 2
+    assert "compliance.regime PCI" in outcome.output
+
+
+def test_preflight_reads_answers(runner, fake_cloud, isolated_home):
+    outcome = _init(
+        runner,
+        sets=(
+            "billing.no_iam=true",
+            "resman.tenants.ten1={descriptive_name: tenant-1}",
+            f'imports.0-bootstrap."{IAC_CORE}"=tst-prod-iac-core-0',
+            f'imports.0-bootstrap."{AUDIT_LOGS}"=tst-prod-audit-logs-0',
+        ),
+    )
+    assert outcome.exit_code == 0, outcome.output
+    preflight = _invoke(runner, "preflight", "--json")
+    assert preflight.exit_code in (0, 1), preflight.output
+    document = json.loads(preflight.stdout)
+    inputs = document["inputs"]
+    assert inputs["prefix"] == "tst"
+    assert inputs["org_id"] == conftest.ORG_ID
+    assert inputs["billing_no_iam"] is True
+    assert inputs["bootstrap_user"] == "admin@example.com"
+    assert "tst-prod-ten1-iac-core-0" in inputs["tenant_project_ids"]
+    assert inputs["imported_project_ids"] == [
+        "tst-prod-audit-logs-0",
+        "tst-prod-iac-core-0",
+    ]
+    ids = {check["check_id"] for check in document["checks"]}
+    assert "naming.imported_projects" in ids
+    assert "naming.tenant_projects" in ids
+
+
+def test_preflight_flags_override_answers(runner, fake_cloud):
+    assert _init(runner).exit_code == 0
+    outcome = _invoke(runner, "preflight", "--json", "--region", "us-west1")
+    document = json.loads(outcome.stdout)
+    assert document["inputs"]["region"] == "us-west1"
+    assert document["inputs"]["regime"] == "IL5"
+
+
+def test_preflight_rejects_broken_answers(runner, fake_cloud, isolated_home):
+    assert _init(runner).exit_code == 0
+    path = isolated_home / "envs" / "tst" / "answers.yaml"
+    path.write_text("prefix: [unclosed\n")
+    outcome = _invoke(runner, "preflight", "--json")
+    assert outcome.exit_code == 2
+
+
+def test_saved_answers_are_valid_yaml(runner, isolated_home):
+    assert _init(runner).exit_code == 0
+    text = (isolated_home / "envs" / "tst" / "answers.yaml").read_text()
+    assert text.startswith(answers_lib.SCHEMA_COMMENT + "\n")
+    assert yaml.YAML(typ="safe").load(text)["prefix"] == "tst"
+
+
+@pytest.mark.terraform
+@pytest.mark.skipif(
+    shutil.which("terraform") is None,
+    reason="terraform is not installed",
+)
+def test_rendered_bootstrap_workspace_validates(runner, isolated_home):
+    outcome = _init(
+        runner,
+        sets=(f'imports.0-bootstrap."{IAC_CORE}"=tst-prod-iac-core-0',),
+    )
+    assert outcome.exit_code == 0, outcome.output
+    assert _invoke(runner, "render", "--stage", "0").exit_code == 0
+    workspace = _workspace(isolated_home, "0-bootstrap")
+    env = {**os.environ, "TF_IN_AUTOMATION": "1"}
+    for command in (
+        ["init", "-backend=false", "-input=false"],
+        ["validate"],
+    ):
+        completed = subprocess.run(
+            ["terraform", f"-chdir={workspace}", *command],
+            capture_output=True,
+            check=False,
+            env=env,
+            text=True,
+            timeout=600,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--set", "prefix=xyz"],
+        ["--prefix", "abc", "--set", "prefix=xyz"],
+    ],
+)
+def test_init_refuses_to_change_the_prefix(runner, isolated_home, args):
+    outcome = _init(
+        runner,
+        "abc",
+        sets=(f'imports.0-bootstrap."{IAC_CORE}"=abc-prod-iac-core-0',),
+    )
+    assert outcome.exit_code == 0, outcome.output
+    changed = _invoke(runner, "init", "--non-interactive", *args)
+    assert changed.exit_code == 2
+    assert "stellar init --answers-from abc --prefix xyz" in changed.output
+    assert not (isolated_home / "envs" / "xyz").exists()
+
+
+def test_init_rejects_overrides_that_render_would_reject(runner, isolated_home):
+    outcome = _init(
+        runner,
+        sets=(
+            "overrides.0-bootstrap.prefix=other",
+            "overrides.0-bootstrap.not_a_var=1",
+            "overrides.1-resman.prefix=zzz",
+        ),
+    )
+    assert outcome.exit_code == 2
+    assert "overrides.0-bootstrap sets prefix, which stellar" in outcome.output
+    assert "overrides.0-bootstrap sets not_a_var" in outcome.output
+    assert "overrides.1-resman sets prefix" in outcome.output
+    assert not (isolated_home / "envs" / "tst").exists()
+
+
+def test_init_rejects_import_ids_of_another_prefix(runner, isolated_home):
+    outcome = _init(
+        runner,
+        sets=(f'imports.0-bootstrap."{IAC_CORE}"=old-prod-iac-core-0',),
+    )
+    assert outcome.exit_code == 2
+    assert "Stage 0 names that project tst-prod-iac-core-0" in outcome.output
+
+
+def test_render_rejects_answers_of_another_prefix(
+    runner, isolated_home, fake_tools
+):
+    assert _init(runner).exit_code == 0
+    path = isolated_home / "envs" / "tst" / "answers.yaml"
+    path.write_text(path.read_text().replace("prefix: tst", "prefix: qqq"))
+    outcome = _invoke(runner, "render", "--stage", "0")
+    assert outcome.exit_code == 2
+    assert "sets prefix qqq, but it belongs to environment tst" in (
+        outcome.output
+    )
+    assert not (_workspace(isolated_home, "0-bootstrap")).exists()
+    listed = _invoke(runner, "env", "list")
+    assert "answers set prefix qqq" in listed.output
+
+
+def test_stale_current_environment(runner, isolated_home):
+    assert _init(runner).exit_code == 0
+    (isolated_home / "current").write_text("zzz\n")
+    for args in (["env", "show"], ["render"]):
+        outcome = _invoke(runner, *args)
+        assert outcome.exit_code == 2
+        assert "current environment zzz no longer exists" in outcome.output
+        assert "stellar env use PREFIX" in outcome.output
+    listed = _invoke(runner, "env", "list")
+    assert listed.exit_code == 0
+    assert "zzz no longer exists" in listed.output
+    # A plain init starts the stale prefix from scratch instead of
+    # reporting a missing prefix.
+    outcome = _invoke(runner, "init", "--non-interactive", *_sets())
+    assert outcome.exit_code == 0, outcome.output
+    assert "init now creates zzz from scratch" in outcome.output
+    assert _answers(isolated_home, "zzz").prefix == "zzz"
+
+
+def test_init_errors_name_their_source(runner, tmp_path):
+    config = tmp_path / "config.env"
+    config.write_text("PREFIX=abc\nORGANIZATION_ID=x\n", encoding="utf-8")
+    outcome = _invoke(
+        runner,
+        "init",
+        "--non-interactive",
+        "--from-config-env",
+        str(config),
+    )
+    assert outcome.exit_code == 2
+    assert f"Invalid answers from --from-config-env {config}:" in (
+        outcome.output
+    )
+    bare = _invoke(runner, "init", "--non-interactive", "--prefix", "abc")
+    assert "Error: Invalid answers:" in bare.output
+
+
+def test_init_accepts_a_home_that_holds_the_engine(runner, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    engine = _engine_copy(home)
+    outcome = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--non-interactive",
+            "--prefix",
+            "tst",
+            *_sets(),
+            "--home",
+            str(home),
+            "--repo",
+            str(engine),
+        ],
+    )
+    assert outcome.exit_code == 0, outcome.output
+    answers = answers_lib.load(home / "envs" / "tst" / "answers.yaml")
+    assert answers.engine is not None
+    assert answers.engine.path == str(engine)
