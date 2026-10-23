@@ -892,22 +892,55 @@ def _guarded(check_id, title, run):
         )
 
 
-def _project_results(ctx, project_ids):
-    """Checks the Stage 0 project IDs for active and soft-deleted holders.
+@dataclasses.dataclass(frozen=True)
+class _ProjectGroup:
+    """Check ids and wording for one set of project IDs a stage creates."""
+
+    check_id: str
+    title: str
+    deleted_id: str
+    deleted_title: str
+    stage: str
+
+
+_STAGE0_PROJECTS = _ProjectGroup(
+    "naming.projects",
+    "Project IDs",
+    "naming.deleted_projects",
+    "Soft-deleted projects",
+    "Stage 0",
+)
+_TENANT_PROJECTS = _ProjectGroup(
+    "naming.tenant_projects",
+    "Tenant project IDs",
+    "naming.deleted_tenant_projects",
+    "Soft-deleted tenant projects",
+    "Stage 1",
+)
+
+
+def _project_states(ctx, project_ids):
+    return {pid: ctx.cloud.visible_project_state(pid) for pid in project_ids}
+
+
+def _undelete(project_ids):
+    return " ".join(f"`gcloud projects undelete {pid}`" for pid in project_ids)
+
+
+def _project_results(ctx, project_ids, group=_STAGE0_PROJECTS):
+    """Checks a stage's project IDs for active and soft-deleted holders.
 
     A deleted project keeps its ID for 30 days, so a soft-deleted holder
-    blocks Stage 0 even on a redeploy. See issue #50.
+    blocks the stage even on a redeploy. See issue #50.
     """
     try:
-        states = {
-            pid: ctx.cloud.visible_project_state(pid) for pid in project_ids
-        }
+        states = _project_states(ctx, project_ids)
     except api.CloudError as error:
         return [
             CheckResult(
-                "naming.projects",
+                group.check_id,
                 Category.NAMING,
-                "Project IDs",
+                group.title,
                 Status.WARN,
                 f"Cannot check for existing resources: {error}",
             )
@@ -919,32 +952,29 @@ def _project_results(ctx, project_ids):
     results = [
         _collision(
             ctx,
-            "naming.projects",
-            "Project IDs",
+            group.check_id,
+            group.title,
             active,
             "projects",
             unseen_note=(
                 " Project IDs are global, so a project outside this "
-                "identity's view can still own one, which Stage 0 "
+                f"identity's view can still own one, which {group.stage} "
                 "reports as a conflict."
             ),
         )
     ]
     if deleted:
-        restore = " ".join(
-            f"`gcloud projects undelete {pid}`" for pid in deleted
-        )
         results.append(
             CheckResult(
-                "naming.deleted_projects",
+                group.deleted_id,
                 Category.NAMING,
-                "Soft-deleted projects",
+                group.deleted_title,
                 Status.FAIL,
                 "Soft-deleted projects still hold these IDs for up to 30 "
                 f"days after deletion: {_listed(deleted)}.",
                 remedy=(
                     "Pick a different prefix, or restore the projects with "
-                    f"{restore} if they belong to this deployment."
+                    f"{_undelete(deleted)} if they belong to this deployment."
                 ),
                 doc=DDG_PREREQUISITES,
             )
@@ -952,14 +982,75 @@ def _project_results(ctx, project_ids):
     else:
         results.append(
             CheckResult(
-                "naming.deleted_projects",
+                group.deleted_id,
                 Category.NAMING,
-                "Soft-deleted projects",
+                group.deleted_title,
                 Status.PASS,
-                "No visible soft-deleted project holds a Stage 0 project ID.",
+                "No visible soft-deleted project holds a "
+                f"{group.stage} project ID.",
             )
         )
     return results
+
+
+def _imported_result(ctx, project_ids):
+    """Checks that the projects import blocks adopt exist and are active.
+
+    Organizations such as Argolis pre-create projects because only a human
+    can link them to billing. Terraform then imports them, so an active
+    holder is expected, and a missing or soft-deleted one makes the import
+    fail.
+    """
+    check_id = "naming.imported_projects"
+    title = "Imported projects"
+    try:
+        states = _project_states(ctx, project_ids)
+    except api.CloudError as error:
+        return CheckResult(
+            check_id,
+            Category.NAMING,
+            title,
+            Status.WARN,
+            f"Cannot check the pre-created projects: {error}",
+        )
+    deleted = [
+        pid for pid, state in states.items() if state == "DELETE_REQUESTED"
+    ]
+    missing = [pid for pid, state in states.items() if state is None]
+    if not deleted and not missing:
+        return CheckResult(
+            check_id,
+            Category.NAMING,
+            title,
+            Status.PASS,
+            f"Pre-created and active, so import blocks adopt them: "
+            f"{_listed(project_ids)}.",
+        )
+    problems = []
+    remedies = []
+    if missing:
+        problems.append(
+            "these projects do not exist or this identity cannot see "
+            f"them: {_listed(missing)}"
+        )
+        remedies.append(
+            "Pre-create the missing projects and grant this identity access "
+            "to them, or remove their entries from `imports` in answers.yaml."
+        )
+    if deleted:
+        problems.append(f"these projects are soft-deleted: {_listed(deleted)}")
+        remedies.append(f"Restore the projects with {_undelete(deleted)}.")
+    return CheckResult(
+        check_id,
+        Category.NAMING,
+        title,
+        Status.FAIL,
+        "Import blocks adopt projects that Terraform cannot import, because "
+        + "; ".join(problems)
+        + ".",
+        remedy=" ".join(remedies),
+        doc=DDG_STAGE0,
+    )
 
 
 def _collision(ctx, check_id, title, taken, what, unseen_note=""):
@@ -1015,10 +1106,29 @@ def check_naming(ctx):
     )
     if not valid:
         return results
+    # Import blocks adopt pre-created projects, so an active holder of one of
+    # these IDs is expected rather than a collision.
+    imported = sorted(set(ctx.inputs.imported_project_ids))
+    # Stage 0 skips the billing export project for some billing answers, so
+    # a holder of that ID is no collision then.
     project_ids = [
-        f"{prefix}-prod-{name}" for name in ctx.repo.stage0_project_names()
+        pid
+        for project in ctx.repo.stage0_projects()
+        if repo_lib.stage0_project_created(
+            project,
+            no_iam=ctx.inputs.billing_no_iam,
+            is_org_level=ctx.inputs.billing_is_org_level,
+        )
+        and (pid := f"{prefix}-prod-{project.name}") not in imported
     ]
     results.extend(_project_results(ctx, project_ids))
+    tenant_ids = [
+        pid for pid in ctx.inputs.tenant_project_ids if pid not in imported
+    ]
+    if tenant_ids:
+        results.extend(_project_results(ctx, tenant_ids, _TENANT_PROJECTS))
+    if imported:
+        results.append(_imported_result(ctx, imported))
     buckets = [
         f"{prefix}-prod-iac-core-{name}-0"
         for name in ("bootstrap", "outputs", "resman")

@@ -15,11 +15,14 @@
 """Inputs for preflight checks and the loaders that resolve them.
 
 Values come from command-line flags or `STELLAR_*` environment variables,
-which Typer resolves, and then from an optional `scripts/config.env` file
-that `scripts/deploy.sh` users already have. Flags always win.
+which Typer resolves, then from the environment's `answers.yaml`, and then
+from an optional `scripts/config.env` file that `scripts/deploy.sh` users
+already have. Flags always win.
 """
 
+from collections.abc import Mapping
 import pathlib
+from typing import Any
 
 import dotenv
 import pydantic
@@ -51,6 +54,10 @@ class PreflightInputs(pydantic.BaseModel):
         default=None, pattern=r"^[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$"
     )
     billing_no_iam: bool = False
+    # False when the billing account belongs to another organization, which
+    # with billing_no_iam decides whether Stage 0 creates the billing export
+    # project.
+    billing_is_org_level: bool = True
     bootstrap_project: str | None = pydantic.Field(
         default=None, pattern=r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
     )
@@ -64,6 +71,11 @@ class PreflightInputs(pydantic.BaseModel):
     )
     groups: dict[str, str] = pydantic.Field(default_factory=dict)
     redeploy: bool = False
+    # Stage 1 tenant project IDs, which only answers.yaml defines.
+    tenant_project_ids: tuple[str, ...] = ()
+    # Project IDs that import blocks adopt instead of creating, so preflight
+    # expects them to exist.
+    imported_project_ids: tuple[str, ...] = ()
 
 
 def load_config_env(path):
@@ -90,13 +102,22 @@ def load_config_env(path):
     return {field: value for field, value in found.items() if value}
 
 
-def resolve(flags, config_env=None):
-    """Merges flag values with an optional config.env file.
+def resolve(
+    flags: Mapping[str, Any],
+    config_env: pathlib.Path | None = None,
+    answer_values: Mapping[str, Any] | None = None,
+) -> PreflightInputs:
+    """Merges flag values with optional answers and a config.env file.
+
+    Precedence is flags, then answers, then config.env.
 
     Args:
-        flags: Field values from the command line or environment. None means
-            the operator did not set the value.
+        flags: Field values from the command line or environment. A falsy
+            value such as None or False means the operator did not set it.
         config_env: Optional path of a `scripts/config.env` file whose values
+            fill fields that flags and answers leave unset.
+        answer_values: Optional field values from the environment's
+            answers, as `config.answers.to_preflight` returns them, which
             fill fields that flags leave unset.
 
     Returns:
@@ -107,6 +128,8 @@ def resolve(flags, config_env=None):
         FileNotFoundError: If config_env does not exist.
     """
     merged = load_config_env(config_env) if config_env else {}
+    if answer_values is not None:
+        merged.update(answer_values)
     merged.update({key: value for key, value in flags.items() if value})
     if isinstance(merged.get("regime"), str):
         merged["regime"] = merged["regime"].upper()
