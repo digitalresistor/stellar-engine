@@ -30,6 +30,7 @@ PROJECT_ID = r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
 # An Assured Workloads regime name in capitals, such as `IL5`.
 REGIME = r"^[A-Z0-9_]+$"
 # A deployment prefix. Stages 0 and 1 validate only its length, which the
-# answers validation reads from the repository; the CLI also keeps the
-# prefix a single safe directory name for the environment.
-PREFIX = r"^[a-z][a-z0-9]*$"
+# answers validation reads from the repository. The pattern keeps every
+# derived project ID valid, and it never matches a path separator or a dot,
+# so the prefix also works as the folder name of the environment.
+PREFIX = r"^[a-z](?:[a-z0-9-]*[a-z0-9])?$"

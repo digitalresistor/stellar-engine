@@ -70,7 +70,7 @@ def test_numeric_organization_id_becomes_string():
     [
         ("prefix", "Tst"),
         ("prefix", "1ab"),
-        ("prefix", "ab-c"),
+        ("prefix", "abc-"),
         ("bootstrap_project", "Bad_Project"),
         ("alert_email", "not-an-email"),
         ("bootstrap_user", "nobody"),

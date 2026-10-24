@@ -1301,8 +1301,8 @@ def _project_results(ctx, project_ids, group=_STAGE0_PROJECTS):
 def _imported_result(ctx, project_ids):
     """Checks that the projects import blocks adopt exist and are active.
 
-    Organizations such as Argolis pre-create projects because only a human
-    can link them to billing. Terraform then imports them, so an active
+    Some organizations pre-create projects because only a human can link
+    them to billing. Terraform then imports them, so an active
     holder is expected, and a missing or soft-deleted one makes the import
     fail.
     """
@@ -1403,8 +1403,8 @@ def check_naming(ctx):
             if valid
             else (
                 f"{prefix} must start with a lowercase letter, use only "
-                f"lowercase letters and digits, and be at most {limit} "
-                "characters."
+                f"lowercase letters, digits and hyphens, and be at most "
+                f"{limit} characters."
             ),
             doc=DDG_PREREQUISITES,
         )

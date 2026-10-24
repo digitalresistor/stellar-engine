@@ -132,13 +132,18 @@ def test_current_and_set_current(tmp_path):
     assert home.current() is None
 
 
-@pytest.mark.parametrize("prefix", ["", "../x", "Abc", "1ab", "a/b", "a-b"])
+@pytest.mark.parametrize("prefix", ["", "../x", "Abc", "1ab", "a/b", "ab-"])
 def test_invalid_env_names(tmp_path, prefix):
     home = paths.Home(tmp_path)
     with pytest.raises(ValueError, match="Invalid prefix"):
         home.env(prefix)
     with pytest.raises(ValueError, match="Invalid prefix"):
         home.set_current(prefix)
+
+
+def test_hyphenated_env_name(tmp_path):
+    home = paths.Home(tmp_path)
+    assert home.env("ab-c").root == home.envs_dir / "ab-c"
 
 
 def test_list_envs_requires_answers(tmp_path):

@@ -107,7 +107,7 @@ def test_review_notes_quiet_when_nothing_is_explicit():
     ("base", "limit", "head"),
     [
         ("lab", 7, "lab"),
-        ("argolis", 7, "arg"),
+        ("example", 7, "exa"),
         ("Lab-Env_1", 7, "lab"),
         ("", 7, ""),
         ("123", 7, ""),
