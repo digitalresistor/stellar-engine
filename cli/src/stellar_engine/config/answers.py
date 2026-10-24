@@ -502,8 +502,8 @@ def to_preflight(answers: models.Answers) -> dict:
 
     Returns:
         Field values without unset ones, including the tenant project IDs,
-        the project IDs that import blocks adopt, and the organization
-        policies that Stage 0 imports.
+        the project IDs and Stage 0 addresses that import blocks adopt, and
+        the organization policies that Stage 0 imports.
     """
     tenant_ids = [
         project_id
@@ -533,6 +533,13 @@ def to_preflight(answers: models.Answers) -> dict:
         "groups": dict(answers.groups),
         "tenant_project_ids": tuple(tenant_ids),
         "imported_project_ids": tuple(imported),
+        "imported_addresses": tuple(
+            sorted(answers.imports.get(paths.BOOTSTRAP, {}))
+        ),
+        # Preflight falls back to the region itself, so a --region flag
+        # also moves a location that the answers leave to the region.
+        "compliance_location": answers.compliance.location,
+        "billing_budget": answers.budget.amount is not None,
         "existing_org_policies": tuple(answers.existing_org_policies),
     }
     return {key: value for key, value in values.items() if value is not None}

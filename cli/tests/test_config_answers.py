@@ -21,6 +21,7 @@ import pytest
 import conftest
 import helpers
 from stellar_engine.config import answers as answers_lib
+from stellar_engine.config import models
 from stellar_engine.preflight import inputs as inputs_lib
 
 
@@ -440,19 +441,30 @@ def test_to_preflight():
             "tst-prod-iac-core-0",
             "tst-prod-ten1-iac-core-0",
         ),
+        "imported_addresses": (
+            conftest.AUTOMATION_ADDRESS,
+            conftest.LOG_EXPORT_ADDRESS,
+            "module.x.google_storage_bucket.bucket[0]",
+        ),
+        "billing_budget": False,
         "existing_org_policies": ("iam.allowedPolicyMemberDomains",),
     }
+
+
+def test_to_preflight_reports_a_budget():
+    # Stage 0 creates the budget on the billing account, so preflight needs
+    # to know about it to judge billing access.
+    answers = helpers.minimal_answers().model_copy(
+        update={"budget": models.Budget(amount=100)}
+    )
+    assert answers_lib.to_preflight(answers)["billing_budget"] is True
 
 
 def test_to_preflight_fits_preflight_inputs():
     values = answers_lib.to_preflight(helpers.minimal_answers())
     assert "bootstrap_user" not in values
     known = set(inputs_lib.PreflightInputs.model_fields)
-    # The preflight slice of this change adds the two tuple fields.
-    assert set(values) - known <= {
-        "tenant_project_ids",
-        "imported_project_ids",
-    }
+    assert set(values) <= known
     inputs_lib.PreflightInputs.model_validate(
         {key: value for key, value in values.items() if key in known}
     )

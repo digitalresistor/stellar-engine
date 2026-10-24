@@ -78,6 +78,15 @@ class PreflightInputs(pydantic.BaseModel):
     # Project IDs that import blocks adopt instead of creating, so preflight
     # expects them to exist.
     imported_project_ids: tuple[str, ...] = ()
+    # Resource addresses that Stage 0 import blocks adopt, such as the
+    # Assured Workloads workload, from `imports.0-bootstrap` in answers.yaml.
+    imported_addresses: tuple[str, ...] = ()
+    # The Assured Workloads location. None uses the region, as the answers
+    # do.
+    compliance_location: str | None = None
+    # Whether Stage 0 creates a budget on the billing account, from the
+    # `budget.amount` answer, which needs billing access whatever exists.
+    billing_budget: bool = False
     # Constraints of the existing organization policies that Stage 0
     # imports, from `existing_org_policies` in answers.yaml. None when the
     # inputs come without answers.yaml, which has nowhere to list them.
