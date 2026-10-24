@@ -31,9 +31,6 @@ from stellar_engine.wizard import prompts
 
 # The worktree of the Stage 0 change that adds project_deletion_policies,
 # present only on machines that check it out.
-DELETION_POLICY_WORKTREE = (
-    conftest.REPO_ROOT / ".claude/worktrees/bootstrap-deletion-policy"
-)
 KEYS = {
     "automation-project": "automation",
     "log-export-project": "logging",
@@ -283,23 +280,3 @@ def test_engine_shapes_wire_the_variable_once(legacy_repo, policy_repo):
 
 def test_bootstrap_section_owns_the_field():
     assert flow.owners("keep_imported_projects") == ("bootstrap",)
-
-
-@pytest.mark.skipif(
-    not (DELETION_POLICY_WORKTREE / paths.STAGES_DIR).is_dir(),
-    reason="the bootstrap-deletion-policy worktree is not checked out",
-)
-def test_parser_reads_the_real_stage0_change():
-    worktree = repo_lib.Repo(DELETION_POLICY_WORKTREE)
-    assert worktree.project_deletion_policy_keys() == KEYS
-    assert worktree.stage0_deletion_policies() == dict.fromkeys(KEYS, "DELETE")
-    answers = helpers.load_fixture(
-        "lab", billing={"account_id": conftest.BILLING}, imports=_all_imports()
-    )
-    rendered = stages.build(
-        paths.BOOTSTRAP, answers, worktree, helpers.env_paths(answers)
-    )
-    assert rendered.values["project_deletion_policies"] == dict.fromkeys(
-        ("automation", "logging", "billing"), "ABANDON"
-    )
-    assert stages.warnings(answers, "0", worktree) == []

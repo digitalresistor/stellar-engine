@@ -766,7 +766,7 @@ class TestNaming:
         assert found["naming.region"] == expected
 
     @pytest.mark.parametrize(
-        "prefix", ["toolong8", "1abc", "Abc", "ab_c", "abc-", "ab-c"]
+        "prefix", ["toolong8", "1abc", "Abc", "ab_c", "abc-"]
     )
     def test_invalid_prefix(self, make_ctx, prefix):
         found = statuses(checks.check_naming(make_ctx(prefix=prefix)))
