@@ -44,6 +44,12 @@ _CLI_OWNED_KEYS = {
     paths.RESMAN: frozenset({"outputs_location"}),
 }
 
+# The import ID of a google_assured_workloads_workload, the workload name.
+_WORKLOAD_ID_RE = re.compile(
+    r"organizations/(?P<org>[0-9]+)/locations/(?P<location>[^/]+)"
+    r"/workloads/[^/]+"
+)
+
 _IDENT = r"[A-Za-z_][A-Za-z0-9_-]*"
 _INDEX = r'\[(?:[0-9]+|"(?:[^"\\]|\\.)*")\]'
 _MODULE_SEGMENT_RE = re.compile(rf"module\.{_IDENT}(?:{_INDEX})?\.")
@@ -124,6 +130,7 @@ def problems(answers: models.Answers, repo: repo_lib.Repo) -> list[str]:
                 for problem in import_address_problems(address)
             )
     found.extend(_stage0_import_id_problems(answers, repo))
+    found.extend(_workload_import_id_problems(answers, repo))
     found.extend(_org_policy_problems(answers, repo))
     found.extend(override_problems(answers, repo))
     return found
@@ -229,6 +236,36 @@ def _stage0_import_id_problems(answers, repo):
                 f"the imported project; set the import ID to {expected}."
             )
     return found
+
+
+def _workload_import_id_problems(answers, repo):
+    """Checks the import ID of a pre-created Assured Workloads workload.
+
+    The workload `organization` and `location` force a new workload, so an
+    ID from another organization or location would make Terraform replace
+    the adopted workload.
+    """
+    address = repo.assured_workload().address
+    import_id = answers.imports.get(paths.BOOTSTRAP, {}).get(address)
+    if import_id is None:
+        return []
+    org = answers.organization.id
+    location = derive.compliance_location(answers)
+    expected = f"organizations/{org}/locations/{location}/workloads/"
+    match = _WORKLOAD_ID_RE.fullmatch(import_id)
+    if (
+        match
+        and match.group("org") == org
+        and match.group("location").lower() == location.lower()
+    ):
+        return []
+    return [
+        f"imports.{paths.BOOTSTRAP}: {address} imports {import_id}, but "
+        f"Stage 0 manages the workload as {expected}<workload_id> for "
+        "organization.id and the Assured Workloads location, so Terraform "
+        "would replace the imported workload; use the workload name that "
+        "the Assured Workloads API returns."
+    ]
 
 
 def _org_policy_problems(answers, repo):

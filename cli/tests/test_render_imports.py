@@ -192,6 +192,22 @@ def test_no_warning_when_billing_export_exists(repo):
     assert imports.warnings(answers, "0", repo) == []
 
 
+def test_warns_on_workload_without_a_regime(repo):
+    answers = _with_imports(
+        entries={
+            repo.assured_workload().address: (
+                f"organizations/{conftest.ORG_ID}/locations/us-east4/"
+                "workloads/abc123"
+            )
+        },
+        billing={"account_id": conftest.BILLING},
+    ).model_copy(deep=True)
+    answers.compliance.regime = "COMPLIANCE_REGIME_UNSPECIFIED"
+    (found,) = imports.warnings(answers, "0", repo)
+    assert "Assured Workloads workload" in found
+    assert "COMPLIANCE_REGIME_UNSPECIFIED" in found
+
+
 def test_no_warning_for_other_stages(repo):
     answers = _with_imports(
         stage="1-resman",
@@ -353,3 +369,15 @@ def test_org_policy_imports_validate_in_bootstrap_workspace(tmp_path):
     assert validate.returncode == 0, validate.stderr + validate.stdout
     fmt = helpers.terraform(ws, "fmt", "-check", imports.filename("0"))
     assert fmt.returncode == 0, fmt.stdout
+
+
+def test_dumps_imports_the_workload():
+    workload_id = (
+        f"organizations/{conftest.ORG_ID}/locations/us-east4/workloads/abc123"
+    )
+    text = imports.dumps(
+        {"google_assured_workloads_workload.primary[0]": workload_id}, []
+    )
+    (block,) = hcl2.loads(text)["import"]
+    assert block["to"] == "${google_assured_workloads_workload.primary[0]}"
+    assert block["id"] == f'"{workload_id}"'

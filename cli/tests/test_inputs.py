@@ -169,6 +169,20 @@ def test_answers_fill_unset_fields(answers):
     )
     # Only project addresses count; the folder import is not a project.
     assert resolved.imported_project_ids == ("ans-prod-iac-core-0",)
+    # Every Stage 0 address counts, such as a pre-created workload.
+    assert resolved.imported_addresses == (
+        "google_folder.unrelated",
+        conftest.AUTOMATION_ADDRESS,
+    )
+    assert resolved.compliance_location is None
+
+
+def test_answers_pass_an_explicit_compliance_location(answers):
+    located = answers.model_copy(
+        update={"compliance": models.Compliance(regime="IL4", location="us")}
+    )
+    resolved = inputs.resolve({}, None, answers_lib.to_preflight(located))
+    assert resolved.compliance_location == "us"
 
 
 def test_flags_override_answers(answers):
@@ -203,6 +217,7 @@ def test_project_id_fields_default_empty():
     resolved = inputs.resolve({})
     assert resolved.tenant_project_ids == ()
     assert resolved.imported_project_ids == ()
+    assert resolved.imported_addresses == ()
 
 
 def test_preflight_inputs_do_not_import_the_config_package():

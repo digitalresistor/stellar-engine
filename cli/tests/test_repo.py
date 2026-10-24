@@ -25,10 +25,12 @@ import subprocess
 import pytest
 
 import conftest
+from stellar_engine import naming
 from stellar_engine import paths
 from stellar_engine import repo as repo_lib
 from stellar_engine.preflight import checks
 from stellar_engine.preflight import regions
+from stellar_engine.render import hcl
 
 _DDG_ROLE_RE = re.compile(r"\((roles/[a-zA-Z.]+)\)")
 
@@ -438,3 +440,221 @@ def test_stage0_project_created_follows_billing_mode(
     flags = {"no_iam": no_iam, "is_org_level": is_org_level}
     assert repo_lib.stage0_project_created(automation, **flags)
     assert repo_lib.stage0_project_created(billing_export, **flags) is expected
+
+
+def _bootstrap_blocks(repo, kind):
+    """Yields each module or resource in Stage 0 as (file, label, body)."""
+    for path in sorted(repo.bootstrap_dir.glob("*.tf")):
+        for block in repo_lib._load_hcl(path).get(kind, []):
+            for label, body in block.items():
+                if kind == "resource":
+                    for name, resource in body.items():
+                        yield path.name, (label, name), resource
+                else:
+                    yield path.name, label, body
+
+
+def test_assured_workload(repo):
+    workload = repo.assured_workload()
+    assert workload.address == "google_assured_workloads_workload.primary[0]"
+    assert workload.skipped_regime == "COMPLIANCE_REGIME_UNSPECIFIED"
+    assert workload.created("IL5")
+    assert not workload.created("COMPLIANCE_REGIME_UNSPECIFIED")
+    # organization.tf ignores billing_account and leaves
+    # provisioned_resources_parent empty, but sets resource_settings.
+    assert workload.replaced_on_import == ("resource_settings",)
+
+
+def _write_workload(tmp_path, lifecycle):
+    """Writes a Stage 0 organization.tf with one workload resource."""
+    stage = tmp_path / paths.STAGES_DIR / paths.BOOTSTRAP
+    stage.mkdir(parents=True)
+    (stage / "organization.tf").write_text(
+        'resource "google_assured_workloads_workload" "primary" {\n'
+        '  billing_account              = "billingAccounts/x"\n'
+        '  provisioned_resources_parent = "folders/1"\n'
+        "  resource_settings {\n"
+        '    resource_type = "CONSUMER_FOLDER"\n'
+        "  }\n"
+        f"  {lifecycle}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    return repo_lib.Repo(tmp_path)
+
+
+def test_assured_workload_without_ignore_changes(tmp_path):
+    workload = _write_workload(tmp_path, "").assured_workload()
+    assert workload.replaced_on_import == repo_lib.WORKLOAD_INPUT_ONLY
+
+
+def test_assured_workload_ignoring_input_only_arguments(tmp_path):
+    fields = ", ".join(repo_lib.WORKLOAD_INPUT_ONLY)
+    workload = _write_workload(
+        tmp_path, f"lifecycle {{\n    ignore_changes = [{fields}]\n  }}"
+    ).assured_workload()
+    assert workload.replaced_on_import == ()
+
+
+def test_assured_workload_matches_organization_tf(repo):
+    # The pre-creation advice names these attributes, so the import of a
+    # workload created by hand plans no replacement.
+    (body,) = [
+        body
+        for filename, (label, _), body in _bootstrap_blocks(repo, "resource")
+        if filename == "organization.tf"
+        and hcl.unquote(label) == repo_lib.WORKLOAD_RESOURCE
+    ]
+    folder = naming.workload_folder_name("${var.prefix}")
+    assert hcl.unquote(body["display_name"]) == folder
+    (settings,) = body["resource_settings"]
+    assert hcl.unquote(settings["display_name"]) == folder
+    assert hcl.unquote(settings["resource_type"]) == "CONSUMER_FOLDER"
+    assert body["violation_notifications_enabled"] is True
+    assert "var.billing_account.id" in body["billing_account"]
+
+
+def test_billing_resources_cover_every_billing_account_use(repo):
+    # Every Stage 0 module or resource that reads the billing account ID
+    # needs billing access. Preflight lists the ones to pre-create, and
+    # reports the budget and the billing account IAM, which nothing
+    # pre-created replaces.
+    passing = set()
+    for _, label, body in _bootstrap_blocks(repo, "module"):
+        if "var.billing_account.id" in str(body):
+            passing.add(f"module.{hcl.unquote(label)}")
+    account_iam = set()
+    for _, (kind, name), body in _bootstrap_blocks(repo, "resource"):
+        if "var.billing_account.id" not in str(body):
+            continue
+        address = f"{hcl.unquote(kind)}.{hcl.unquote(name)}"
+        if hcl.unquote(kind) == "google_billing_account_iam_member":
+            account_iam.add(address)
+        else:
+            passing.add(address)
+    assert account_iam
+    budget = f"module.{repo_lib.BUDGET_MODULE}"
+    assert budget in passing
+    passing.discard(budget)
+    resources = repo.billing_resources(
+        prefix="abc",
+        regime="IL5",
+        location="us-east4",
+        no_iam=False,
+        is_org_level=True,
+    )
+    listed = {
+        item.address.split(".google_project.")[0].removesuffix("[0]")
+        if item.kind == repo_lib.BillingResourceKind.PROJECT
+        else item.address.removesuffix("[0]")
+        for item in resources
+    }
+    assert listed == passing
+    assert {
+        f"module.{project.module}" for project in repo.stage0_projects()
+    } < passing
+
+
+@pytest.mark.parametrize(
+    ("no_iam", "is_org_level", "names"),
+    [
+        (
+            False,
+            True,
+            [
+                "abc-prod-iac-core-0",
+                "abc-prod-audit-logs-0",
+                "abc-prod-billing-exp-0",
+            ],
+        ),
+        (True, True, ["abc-prod-iac-core-0", "abc-prod-audit-logs-0"]),
+        (False, False, ["abc-prod-iac-core-0", "abc-prod-audit-logs-0"]),
+    ],
+)
+def test_billing_resources_follow_billing_answers(
+    repo, no_iam, is_org_level, names
+):
+    resources = repo.billing_resources(
+        prefix="abc",
+        regime="IL5",
+        location="us-east4",
+        no_iam=no_iam,
+        is_org_level=is_org_level,
+        org_id=conftest.ORG_ID,
+    )
+    projects = [
+        item
+        for item in resources
+        if item.kind == repo_lib.BillingResourceKind.PROJECT
+    ]
+    assert [item.name for item in projects] == names
+    assert [item.address for item in projects] == [
+        project.address
+        for project in repo.created_stage0_projects(
+            no_iam=no_iam, is_org_level=is_org_level
+        )
+    ]
+    assert all(item.import_id == item.name for item in projects)
+    workload = resources[-1]
+    assert workload.kind == repo_lib.BillingResourceKind.WORKLOAD
+    assert workload.address == repo.assured_workload().address
+    assert workload.name == "StellarEngine-abc"
+    assert workload.import_id == (
+        f"organizations/{conftest.ORG_ID}/locations/us-east4/workloads/"
+        "<workload_id>"
+    )
+    assert "IL5" in workload.create
+    assert "us-east4" in workload.create
+
+
+def test_billing_resources_skip_the_workload_without_a_regime(repo):
+    resources = repo.billing_resources(
+        prefix="abc",
+        regime="COMPLIANCE_REGIME_UNSPECIFIED",
+        location="us-east4",
+        no_iam=True,
+        is_org_level=True,
+    )
+    assert [item.kind for item in resources] == [
+        repo_lib.BillingResourceKind.PROJECT,
+        repo_lib.BillingResourceKind.PROJECT,
+    ]
+
+
+def test_budget_module_follows_the_budget_variable(repo):
+    # Preflight treats the budget.amount answer as a use of the billing
+    # account, because Stage 0 creates this module only for that variable.
+    (body,) = [
+        body
+        for filename, label, body in _bootstrap_blocks(repo, "module")
+        if hcl.unquote(label) == repo_lib.BUDGET_MODULE
+    ]
+    assert "var.billing_budget_amount != null" in str(body["count"])
+    assert "var.billing_account.id" in str(body["id"])
+
+
+@pytest.mark.parametrize(
+    ("no_iam", "is_org_level", "expected"),
+    [(False, True, False), (True, False, False), (False, False, True)],
+)
+def test_billing_iam_on_account_follows_billing_mode(
+    repo, no_iam, is_org_level, expected
+):
+    # `google_billing_account_iam_member` in billing.tf exists only in the
+    # "resource" billing mode.
+    text = (repo.bootstrap_dir / "billing.tf").read_text(encoding="utf-8")
+    assert 'local.billing_mode == "resource"' in text
+    assert (
+        repo_lib.billing_iam_on_account(
+            no_iam=no_iam, is_org_level=is_org_level
+        )
+        is expected
+    )
+
+
+def test_assured_workload_requires_one_resource(tmp_path):
+    stage = tmp_path / paths.STAGES_DIR / paths.BOOTSTRAP
+    stage.mkdir(parents=True)
+    (stage / "organization.tf").write_text("", encoding="utf-8")
+    with pytest.raises(repo_lib.RepoError, match="Expected one"):
+        repo_lib.Repo(tmp_path).assured_workload()

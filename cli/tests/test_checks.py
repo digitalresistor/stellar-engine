@@ -14,9 +14,12 @@
 
 """Tests for the individual preflight checks."""
 
+import dataclasses
+
 import pytest
 
 import conftest
+from stellar_engine import repo as repo_lib
 from stellar_engine.gcp import api
 from stellar_engine.preflight import checks
 from stellar_engine.preflight import result
@@ -174,6 +177,13 @@ def resolved(make_ctx, **overrides):
     return ctx
 
 
+def resolved_roles(make_ctx, **overrides):
+    """Returns a context after the organization and IAM role checks ran."""
+    ctx = resolved(make_ctx, **overrides)
+    checks.check_iam_roles(ctx)
+    return ctx
+
+
 class TestIamRoles:
     def test_all_granted(self, make_ctx, repo, cloud):
         found = statuses(checks.check_iam_roles(resolved(make_ctx)))
@@ -240,10 +250,11 @@ class TestIamRoles:
 
 class TestBilling:
     def test_pass(self, make_ctx):
-        found = statuses(checks.check_billing(make_ctx()))
+        found = statuses(checks.check_billing(resolved_roles(make_ctx)))
         assert found == {
             "billing.account": Status.PASS,
             "billing.project": Status.PASS,
+            "billing.precreate": Status.PASS,
         }
 
     def test_closed_account(self, make_ctx, cloud):
@@ -284,7 +295,10 @@ class TestBilling:
 
     def test_skipped(self, make_ctx):
         found = statuses(checks.check_billing(make_ctx(billing_account=None)))
-        assert found == {"billing.account": Status.SKIP}
+        assert found == {
+            "billing.account": Status.SKIP,
+            "billing.precreate": Status.SKIP,
+        }
 
     def test_link_checked_without_billing_iam(self, make_ctx):
         found = by_id(checks.check_billing(make_ctx(billing_no_iam=True)))
@@ -293,6 +307,7 @@ class TestBilling:
             "billing.account",
             "billing.link",
             "billing.project",
+            "billing.precreate",
         ]
 
     def test_link_not_checked_with_billing_iam(self, make_ctx):
@@ -315,6 +330,347 @@ class TestBilling:
         found = by_id(checks.check_billing(make_ctx(billing_no_iam=True)))
         assert found["billing.link"].status == Status.FAIL
         assert "Cannot test project linking" in found["billing.link"].detail
+
+
+WORKLOAD = "google_assured_workloads_workload.primary[0]"
+WORKLOAD_NAME = "StellarEngine-tst"
+ADMIN_PERMISSION = "roles/billing.admin.permission"
+LINK_DENIED = {checks.BILLING_LINK_PERMISSION}
+# Pre-created Stage 0 resources when Stage 0 manages no billing IAM.
+NO_IAM_IMPORTS = (
+    conftest.AUTOMATION_ADDRESS,
+    conftest.LOG_EXPORT_ADDRESS,
+    WORKLOAD,
+)
+
+
+@pytest.fixture
+def importable_workload(repo, monkeypatch):
+    """Models Stage 0 code that ignores the workload input-only arguments.
+
+    The checked-in `organization.tf` does not ignore `resource_settings`, so
+    an import of a pre-created workload there plans a replacement.
+    """
+    workload = dataclasses.replace(
+        repo.assured_workload(), replaced_on_import=()
+    )
+    monkeypatch.setattr(
+        repo_lib.Repo, "assured_workload", lambda self: workload
+    )
+
+
+def billing_results(make_ctx, **overrides):
+    """Runs the role and billing checks, as a preflight run orders them."""
+    ctx = make_ctx(**overrides)
+    checks.check_identity(ctx)
+    checks.check_organization(ctx)
+    checks.check_iam_roles(ctx)
+    return by_id(checks.check_billing(ctx))
+
+
+class TestPrecreate:
+    def test_admin_access_needs_no_precreation(self, make_ctx):
+        precreate = billing_results(make_ctx)["billing.precreate"]
+        assert precreate.status == Status.PASS
+        assert "No pre-creation is needed" in precreate.detail
+        assert "roles/billing.admin" in precreate.detail
+
+    def test_link_access_needs_no_precreation(self, make_ctx):
+        found = billing_results(make_ctx, billing_no_iam=True)
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.PASS
+        assert checks.BILLING_LINK_PERMISSION in precreate.detail
+
+    def test_no_link_access_lists_every_resource(self, make_ctx, cloud):
+        cloud.billing_account = api.AccessDeniedError("denied")
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(make_ctx, billing_no_iam=True)
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.FAIL
+        for text in (
+            conftest.AUTOMATION_ADDRESS,
+            "tst-prod-iac-core-0",
+            conftest.LOG_EXPORT_ADDRESS,
+            "tst-prod-audit-logs-0",
+            WORKLOAD,
+            f"IL5 workload {WORKLOAD_NAME} in us-east4",
+            f"organizations/{conftest.ORG_ID}/locations/us-east4/workloads/",
+        ):
+            assert text in precreate.detail
+        # Stage 0 skips the billing export project with billing.no_iam.
+        assert "billing-exp-0" not in precreate.detail
+        fix = remedy(precreate)
+        assert "roles/billing.user" in fix
+        assert conftest.USER in fix
+        assert "imports.0-bootstrap" in fix
+        assert "stellar render" in fix
+        assert "violation notifications enabled" in fix
+        # The billing failures stay, and point at the new check.
+        assert found["billing.account"].status == Status.FAIL
+        assert found["billing.link"].status == Status.FAIL
+        for check_id in ("billing.account", "billing.link"):
+            assert "billing.precreate check lists" in remedy(found[check_id])
+
+    def test_partial_imports_list_only_the_missing(self, make_ctx, cloud):
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(
+            make_ctx,
+            billing_no_iam=True,
+            imported_addresses=(conftest.AUTOMATION_ADDRESS,),
+        )
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.FAIL
+        assert conftest.AUTOMATION_ADDRESS not in precreate.detail
+        assert conftest.LOG_EXPORT_ADDRESS in precreate.detail
+        assert WORKLOAD in precreate.detail
+
+    @pytest.mark.usefixtures("importable_workload")
+    def test_all_imported_passes_and_downgrades(self, make_ctx, cloud):
+        cloud.billing_account = api.AccessDeniedError("denied")
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(
+            make_ctx, billing_no_iam=True, imported_addresses=NO_IAM_IMPORTS
+        )
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.PASS
+        assert "tst-prod-iac-core-0" in precreate.detail
+        assert WORKLOAD_NAME in precreate.detail
+        for check_id in ("billing.account", "billing.link"):
+            item = found[check_id]
+            assert item.status == Status.WARN
+            assert "Stage 0 needs no billing access" in item.detail
+            assert "billing.precreate" in item.detail
+            assert "Stages 1 to 3" in item.detail
+        assert "Stages 2 and 3" in precreate.detail
+        assert list(found) == [
+            "billing.account",
+            "billing.link",
+            "billing.project",
+            "billing.precreate",
+        ]
+
+    @pytest.mark.usefixtures("importable_workload")
+    def test_closed_account_is_not_downgraded(self, make_ctx, cloud):
+        cloud.billing_account = api.BillingAccount(conftest.BILLING, False)
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(
+            make_ctx, billing_no_iam=True, imported_addresses=NO_IAM_IMPORTS
+        )
+        assert found["billing.precreate"].status == Status.PASS
+        assert found["billing.account"].status == Status.FAIL
+        assert found["billing.link"].status == Status.WARN
+
+    def test_disabled_api_is_not_downgraded(self, make_ctx, cloud):
+        cloud.billing_account = api.ApiDisabledError(
+            "cloudbilling.googleapis.com", "123"
+        )
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(
+            make_ctx, billing_no_iam=True, imported_addresses=NO_IAM_IMPORTS
+        )
+        assert found["billing.account"].status == Status.FAIL
+        assert found["billing.account"].remedy is None
+
+    def test_no_admin_access_lists_the_billing_export(self, make_ctx, cloud):
+        cloud.denied_billing_perms = {ADMIN_PERMISSION}
+        found = billing_results(make_ctx)
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.FAIL
+        assert "Billing Account Administrator" in precreate.detail
+        assert conftest.BILLING_EXPORT_ADDRESS in precreate.detail
+        assert "roles/billing.admin" in remedy(precreate)
+        assert "billing.no_iam" not in remedy(precreate)
+
+    @pytest.mark.usefixtures("importable_workload")
+    def test_no_admin_access_all_imported_passes(self, make_ctx, cloud):
+        cloud.denied_billing_perms = {ADMIN_PERMISSION}
+        imported = (*NO_IAM_IMPORTS, conftest.BILLING_EXPORT_ADDRESS)
+        ctx = make_ctx(imported_addresses=imported)
+        checks.check_organization(ctx)
+        roles = by_id(checks.check_iam_roles(ctx))
+        found = by_id(checks.check_billing(ctx))
+        assert found["billing.precreate"].status == Status.PASS
+        # With billing_mode "org", Stage 0 grants billing roles on the
+        # organization, so the missing role on the account only warns.
+        admin = roles[f"iam.{checks.BILLING_ADMIN_ROLE}"]
+        assert admin.status == Status.WARN
+        assert "Stage 0 needs no billing access" in admin.detail
+
+    def test_no_admin_access_missing_imports_keeps_role_fail(
+        self, make_ctx, cloud
+    ):
+        cloud.denied_billing_perms = {ADMIN_PERMISSION}
+        ctx = make_ctx()
+        checks.check_organization(ctx)
+        roles = by_id(checks.check_iam_roles(ctx))
+        assert roles[f"iam.{checks.BILLING_ADMIN_ROLE}"].status == Status.FAIL
+
+    def test_workload_import_that_replaces_fails(self, make_ctx, cloud):
+        # The checked-in organization.tf sets resource_settings without
+        # ignoring it, so the import plans a replacement.
+        cloud.billing_account = api.AccessDeniedError("denied")
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(
+            make_ctx, billing_no_iam=True, imported_addresses=NO_IAM_IMPORTS
+        )
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.FAIL
+        assert "cannot adopt a pre-created Assured Workloads workload" in (
+            precreate.detail
+        )
+        assert "resource_settings" in precreate.detail
+        assert "lifecycle.ignore_changes" in remedy(precreate)
+        assert found["billing.account"].status == Status.FAIL
+        assert found["billing.link"].status == Status.FAIL
+
+    def test_workload_hint_without_import(self, make_ctx, cloud):
+        cloud.denied_billing_perms = LINK_DENIED
+        precreate = billing_results(make_ctx, billing_no_iam=True)[
+            "billing.precreate"
+        ]
+        fix = remedy(precreate)
+        assert "because the API requires one" in fix
+        assert "helps only once organization.tf lists resource_settings" in fix
+
+    @pytest.mark.usefixtures("importable_workload")
+    def test_budget_still_fails(self, make_ctx, cloud):
+        # The budget lives on the billing account, so no pre-created
+        # resource replaces the access it needs.
+        cloud.billing_account = api.AccessDeniedError("denied")
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(
+            make_ctx,
+            billing_no_iam=True,
+            imported_addresses=NO_IAM_IMPORTS,
+            billing_budget=True,
+        )
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.FAIL
+        assert "billing-account-budget" in precreate.detail
+        assert "roles/billing.costsManager" in precreate.detail
+        assert "Remove the budget.amount answer" in remedy(precreate)
+        assert found["billing.account"].status == Status.FAIL
+        assert found["billing.link"].status == Status.FAIL
+
+    def test_billing_iam_on_the_account_still_fails(self, make_ctx, cloud):
+        # Stage 0 grants roles on a billing account outside the
+        # organization, which no pre-created resource replaces.
+        cloud.denied_billing_perms = {ADMIN_PERMISSION}
+        found = billing_results(
+            make_ctx,
+            billing_is_org_level=False,
+            imported_addresses=NO_IAM_IMPORTS,
+        )
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.FAIL
+        assert "grants roles on the billing account itself" in (
+            precreate.detail
+        )
+        assert "Set billing.no_iam to true" in remedy(precreate)
+        assert "violation notifications" not in remedy(precreate)
+
+    def test_unspecified_regime_has_no_workload(self, make_ctx, cloud):
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(
+            make_ctx,
+            billing_no_iam=True,
+            regime="COMPLIANCE_REGIME_UNSPECIFIED",
+            imported_addresses=NO_IAM_IMPORTS[:2],
+        )
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.PASS
+        assert WORKLOAD_NAME not in precreate.detail
+
+    def test_compliance_location_wins_over_region(self, make_ctx, cloud):
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(
+            make_ctx, billing_no_iam=True, compliance_location="us"
+        )
+        detail = found["billing.precreate"].detail
+        assert f"{WORKLOAD_NAME} in us with" in detail
+        assert "/locations/us/workloads/" in detail
+
+    def test_flag_only_run_lists_everything(self, make_ctx, cloud):
+        # Flags give no imports and no tenant projects, so every resource
+        # needs pre-creation and no Stage 1 note appears.
+        cloud.denied_billing_perms = LINK_DENIED
+        precreate = billing_results(make_ctx, billing_no_iam=True)[
+            "billing.precreate"
+        ]
+        assert precreate.status == Status.FAIL
+        assert "Stage 1" not in precreate.detail
+
+    def test_flag_only_run_without_prefix_skips(self, make_ctx, cloud):
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(make_ctx, billing_no_iam=True, prefix=None)
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.SKIP
+        assert "--prefix" in precreate.detail
+
+    def test_untestable_link_skips(self, make_ctx, cloud):
+        cloud.billing_perm_error = api.ApiDisabledError(
+            "cloudbilling.googleapis.com", "123"
+        )
+        found = billing_results(make_ctx, billing_no_iam=True)
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.SKIP
+        assert "billing.link" in precreate.detail
+
+    def test_untestable_admin_role_skips(self, make_ctx, cloud):
+        cloud.billing_perm_error = api.ApiDisabledError(
+            "cloudbilling.googleapis.com", "123"
+        )
+        precreate = billing_results(make_ctx)["billing.precreate"]
+        assert precreate.status == Status.SKIP
+        assert "iam.roles/billing.admin" in precreate.detail
+
+    def test_admin_role_without_org_skips(self, make_ctx):
+        precreate = by_id(checks.check_billing(make_ctx()))["billing.precreate"]
+        assert precreate.status == Status.SKIP
+        assert "--org" in precreate.detail
+
+    @pytest.mark.usefixtures("importable_workload")
+    def test_tenant_projects_are_listed(self, make_ctx, cloud):
+        cloud.denied_billing_perms = LINK_DENIED
+        found = billing_results(
+            make_ctx,
+            billing_no_iam=True,
+            imported_addresses=NO_IAM_IMPORTS,
+            tenant_project_ids=TENANT_IDS,
+            imported_project_ids=(TENANT_IDS[0],),
+        )
+        precreate = found["billing.precreate"]
+        assert precreate.status == Status.PASS
+        assert TENANT_IDS[1] in precreate.detail
+        assert TENANT_IDS[0] not in precreate.detail
+        assert "billing_override" in precreate.detail
+
+    def test_tenant_projects_are_not_listed_with_access(self, make_ctx):
+        found = billing_results(make_ctx, tenant_project_ids=TENANT_IDS)
+        assert TENANT_IDS[0] not in found["billing.precreate"].detail
+
+
+class TestWorkloadFolder:
+    def test_imported_workload_folder_passes(self, make_ctx, cloud):
+        cloud.folders = ["folders/1"]
+        ctx = resolved(make_ctx, imported_addresses=(WORKLOAD,))
+        folder = by_id(checks.check_naming(ctx))["naming.folder"]
+        assert folder.status == Status.PASS
+        assert "pre-created; Stage 0 imports the workload" in folder.detail
+
+    def test_imported_workload_without_folder_warns(self, make_ctx):
+        ctx = resolved(make_ctx, imported_addresses=(WORKLOAD,))
+        folder = by_id(checks.check_naming(ctx))["naming.folder"]
+        assert folder.status == Status.WARN
+        assert WORKLOAD_NAME in folder.detail
+
+    def test_existing_folder_without_import_collides(self, make_ctx, cloud):
+        cloud.folders = ["folders/1"]
+        ctx = resolved(
+            make_ctx, imported_addresses=(conftest.AUTOMATION_ADDRESS,)
+        )
+        folder = by_id(checks.check_naming(ctx))["naming.folder"]
+        assert folder.status == Status.FAIL
 
 
 class TestProject:

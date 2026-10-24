@@ -362,6 +362,27 @@ order of the DDG prerequisites section.
 - With that flag, preflight skips the Billing Account Administrator check
   and tests only the `billing.resourceAssociations.create` permission that
   links new projects to the billing account.
+- The `billing.precreate` check lists each Stage 0 resource that needs
+  billing access at creation, when the deploying identity lacks that access.
+- These resources are the Stage 0 projects and the Assured Workloads
+  workload, because the Assured Workloads API creates a workload only for a
+  caller that can use the billing account.
+- That check passes once the `imports.0-bootstrap` answer adopts every
+  listed resource.
+- The billing account, project linking, and Billing Account Administrator
+  failures then become warnings.
+- That check still fails when Stage 0 grants roles on the billing account
+  itself or creates a budget from the `budget.amount` answer, because no
+  pre-created resource replaces that access.
+- That check also fails while the Stage 0 code leaves an input-only
+  workload argument out of `lifecycle.ignore_changes`, because the import
+  would then plan a replacement of the workload.
+- That check also lists the Stage 1 tenant project IDs, because Stage 1
+  links them to the billing account too.
+- Stages 2 and 3 link their networking and security projects to the billing
+  account as well, so the check points to the `billing_override` answer.
+- A run without `answers.yaml` has no import blocks, so it lists every
+  resource as missing.
 - The bootstrap project is active and has every API that
   `fast/stages-aw/0-bootstrap/enableServices.sh` enables, plus the Cloud
   Monitoring API that the DDG requires.
@@ -372,6 +393,8 @@ order of the DDG prerequisites section.
   page, and the regime appears in the Stage 0 `regime_mapping` variable.
 - The prefix is valid, and no project, state bucket, or Assured Workloads
   folder that Stage 0 creates already exists with that prefix.
+- An existing Assured Workloads folder passes the folder check when the
+  `imports.0-bootstrap` answer adopts the workload that owns the folder.
 - No soft-deleted project still holds a project ID that Stage 0 creates,
   because a deleted project keeps its ID for 30 days.
 - The naming checks skip the billing export project unless the
@@ -406,6 +429,10 @@ already include.
   value for `-var bootstrap_user` on the first Stage 0 apply.
 - The `--redeploy` flag downgrades existing prefix resources to warnings when
   you rerun preflight against your own earlier deployment.
+- The deploying identity needs Billing Account Administrator on the billing
+  account, or Billing Account User when the `billing.no_iam` answer is true.
+- Without that access, someone who has it pre-creates the resources that the
+  `billing.precreate` check lists, and Stage 0 imports them.
 
 ## 7 Render the workspaces
 
@@ -446,11 +473,11 @@ A render owns each tfvars file it writes, so put lasting changes in the
 - The `--force` flag replaces an edited file after it saves a
   `terraform.tfvars.backup.<timestamp>` copy.
 
-## 8 Adopt existing projects
+## 8 Adopt existing resources
 
-Terraform import blocks adopt Stage 0 projects that an administrator creates
-in advance, so Stage 0 moves them into its folders instead of creating them
-and linking billing again.
+Terraform import blocks adopt Stage 0 projects and the Assured Workloads
+workload that an administrator creates in advance, so a deployer without
+billing access can still apply Stage 0.
 
 ```yaml
 imports:
@@ -499,6 +526,44 @@ keeps the pre-created projects once the Stage 0 code declares the
   `overrides` answer for that reason.
 - The `--answers-from` flag carries the `keep_imported_projects` answer,
   because it records a preference rather than the state of an organization.
+
+### 8.3 Pre-create the workload
+
+The Assured Workloads API creates a workload only for a caller that can use
+the billing account, so a deployer without billing access needs an
+administrator to create the workload first.
+
+```yaml
+imports:
+  0-bootstrap:
+    google_assured_workloads_workload.primary[0]: organizations/123456789012/locations/us-east4/workloads/abc123
+```
+
+- The `billing.precreate` preflight check names the workload, its regime,
+  and its location.
+- Create the workload with the billing account, because the API requires
+  one.
+- Enable violation notifications on the workload, because the
+  `organization.tf` file sets them.
+- The API never returns the `resource_settings` argument, so the import
+  plans a replacement unless the workload `lifecycle.ignore_changes` list
+  in the `organization.tf` file names that argument.
+- The `billing.precreate` check fails until the Stage 0 code ignores that
+  argument.
+- Review the Stage 0 plan before you apply it, and confirm that it imports
+  the workload without a replacement.
+- Give the workload and its consumer folder the display name that the
+  check names.
+- Add the workload name that the Assured Workloads API returns to the
+  `imports.0-bootstrap` answer.
+- The import ID must name the organization from the `organization.id`
+  answer and the location from the `compliance.location` answer, which
+  defaults to the region.
+- The `stellar init` and `stellar render` commands reject any other import
+  ID, because Terraform would replace the imported workload.
+- The `stellar render` command warns about a workload import when the
+  `compliance.regime` answer is `COMPLIANCE_REGIME_UNSPECIFIED`, because
+  Stage 0 creates no workload then.
 
 ## 9 Import organization policies
 

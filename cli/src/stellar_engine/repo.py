@@ -31,6 +31,7 @@ import hcl2
 from packaging import version
 import yaml
 
+from stellar_engine import naming
 from stellar_engine import paths
 from stellar_engine.render import hcl
 
@@ -95,6 +96,27 @@ _STAGE0_PROJECT_MODULES = (
     ("log-export.tf", "log-export-project"),
     ("billing.tf", BILLING_EXPORT_MODULE),
 )
+# The Stage 0 file and resource type of the Assured Workloads workload,
+# which the API only creates for a caller that can use the billing account.
+_WORKLOAD_FILE = "organization.tf"
+WORKLOAD_RESOURCE = "google_assured_workloads_workload"
+# The workload `count` expression skips one regime, such as
+# `var.assured_workloads.regime != "COMPLIANCE_REGIME_UNSPECIFIED" ? 1 : 0`.
+_WORKLOAD_COUNT_RE = re.compile(
+    r'var\.assured_workloads\.regime\s*!=\s*\\?"(?P<regime>[A-Z0-9_]+)\\?"'
+)
+# Workload arguments that the Assured Workloads API never returns, so an
+# imported workload reads them as unset. The provider marks them ForceNew and
+# its import tests ignore them, so an import plans a replacement unless the
+# workload `lifecycle.ignore_changes` lists each one that Stage 0 sets.
+WORKLOAD_INPUT_ONLY = (
+    "billing_account",
+    "provisioned_resources_parent",
+    "resource_settings",
+)
+# The Stage 0 module that creates a budget on the billing account when the
+# `billing_budget_amount` variable is set.
+BUDGET_MODULE = "billing-account-budget"
 # Newer Stage 0 versions declare this object variable and pass one of its
 # keys to the `deletion_policy` of each project module.
 PROJECT_DELETION_POLICIES = "project_deletion_policies"
@@ -145,6 +167,30 @@ def billing_export_created(*, no_iam: bool, is_org_level: bool) -> bool:
     return not no_iam and is_org_level
 
 
+def billing_iam_on_account(*, no_iam: bool, is_org_level: bool) -> bool:
+    """Returns whether Stage 0 grants roles on the billing account itself.
+
+    Mirrors `local.billing_mode == "resource"` in `0-bootstrap/billing.tf`,
+    whose `google_billing_account_iam_member` resources need Billing Account
+    Administrator whatever resources exist already.
+
+    Args:
+        no_iam: The `billing_account.no_iam` value.
+        is_org_level: The `billing_account.is_org_level` value.
+    """
+    return not no_iam and not is_org_level
+
+
+def _sets_argument(value) -> bool:
+    """Returns whether an HCL argument sets a value other than empty.
+
+    An empty string reads back as unset, so it never forces a new resource.
+    """
+    if value is None or value == []:
+        return False
+    return not (isinstance(value, str) and hcl.unquote(value) == "")
+
+
 def stage0_project_created(
     project: Stage0Project, *, no_iam: bool, is_org_level: bool
 ) -> bool:
@@ -158,6 +204,65 @@ def stage0_project_created(
     if project.module == BILLING_EXPORT_MODULE:
         return billing_export_created(no_iam=no_iam, is_org_level=is_org_level)
     return True
+
+
+@dataclasses.dataclass(frozen=True)
+class AssuredWorkload:
+    """The Assured Workloads workload that Stage 0 creates.
+
+    Attributes:
+        address: Address of the workload resource, which an import block
+            adopts, such as `google_assured_workloads_workload.primary[0]`.
+        skipped_regime: The regime for which the resource `count` is 0,
+            or None when the resource has no `count`.
+        replaced_on_import: Input-only arguments that Stage 0 sets without
+            listing them in `lifecycle.ignore_changes`, so an import of a
+            pre-created workload plans a replacement.
+    """
+
+    address: str
+    skipped_regime: str | None = None
+    replaced_on_import: tuple[str, ...] = ()
+
+    def created(self, regime: str) -> bool:
+        """Returns whether Stage 0 creates the workload for a regime.
+
+        Args:
+            regime: Assured Workloads regime, such as `IL5`.
+        """
+        return regime != self.skipped_regime
+
+
+class BillingResourceKind(enum.StrEnum):
+    """Kinds of Stage 0 resource that need billing access at creation."""
+
+    PROJECT = "project"
+    WORKLOAD = "Assured Workloads workload"
+
+
+@dataclasses.dataclass(frozen=True)
+class BillingResource:
+    """A Stage 0 resource whose creation needs access to the billing account.
+
+    A deployer without that access needs someone who has it to create the
+    resource first, so Stage 0 imports it instead.
+
+    Attributes:
+        kind: Kind of resource.
+        address: Address of the resource, the key of its entry in
+            `imports.0-bootstrap`.
+        name: Project ID, or the display name of the workload.
+        create: What to create, as a sentence fragment that names the
+            attributes the import must match.
+        import_id: The import ID of the entry, with a placeholder for a
+            part that only exists after creation.
+    """
+
+    kind: BillingResourceKind
+    address: str
+    name: str
+    create: str
+    import_id: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -579,6 +684,131 @@ class Repo:
                 project, no_iam=no_iam, is_org_level=is_org_level
             )
         ]
+
+    @functools.cached_property
+    def _assured_workload(self):
+        found = []
+        parsed = _load_hcl(self.bootstrap_dir / _WORKLOAD_FILE)
+        for block in parsed.get("resource", []):
+            for kind, bodies in block.items():
+                if hcl.unquote(kind) != WORKLOAD_RESOURCE:
+                    continue
+                for name, body in bodies.items():
+                    found.append((hcl.unquote(name), body))
+        if len(found) != 1:
+            raise RepoError(
+                f"Expected one {WORKLOAD_RESOURCE} in 0-bootstrap/"
+                f"{_WORKLOAD_FILE}, found {len(found)}"
+            )
+        name, body = found[0]
+        count = body.get("count")
+        skipped = None
+        if count is not None:
+            match = _WORKLOAD_COUNT_RE.search(str(count))
+            if match is None:
+                raise RepoError(f"Cannot read the count of {WORKLOAD_RESOURCE}")
+            skipped = match.group("regime")
+        ignored = {
+            hcl.unquote(str(field))
+            for lifecycle in body.get("lifecycle", [])
+            for field in lifecycle.get("ignore_changes", [])
+        }
+        replaced = tuple(
+            field
+            for field in WORKLOAD_INPUT_ONLY
+            if _sets_argument(body.get(field)) and field not in ignored
+        )
+        return AssuredWorkload(
+            address=f"{WORKLOAD_RESOURCE}.{name}{_counted(body)}",
+            skipped_regime=skipped,
+            replaced_on_import=replaced,
+        )
+
+    def assured_workload(self):
+        """Returns the Assured Workloads workload that Stage 0 creates.
+
+        Returns:
+            An `AssuredWorkload` read from the single
+            `google_assured_workloads_workload` resource in
+            `0-bootstrap/organization.tf`.
+
+        Raises:
+            RepoError: If the file declares no such resource or more than
+                one, or its `count` does not compare the regime.
+        """
+        return self._assured_workload
+
+    def billing_resources(
+        self,
+        *,
+        prefix: str,
+        regime: str,
+        location: str,
+        no_iam: bool,
+        is_org_level: bool,
+        org_id: str | None = None,
+    ):
+        """Returns the Stage 0 resources that need billing access to create.
+
+        Each Stage 0 project links to the billing account, and the Assured
+        Workloads API only creates a workload for a caller that can use the
+        billing account. A deployer without that access needs someone who
+        has it to create these resources, and Stage 0 imports them.
+
+        Args:
+            prefix: Deployment prefix.
+            regime: Assured Workloads regime, such as `IL5`.
+            location: Assured Workloads location, such as `us-east4`.
+            no_iam: The `billing_account.no_iam` value.
+            is_org_level: The `billing_account.is_org_level` value.
+            org_id: Numeric organization ID for the workload import ID, or
+                None for a placeholder.
+
+        Returns:
+            A list of `BillingResource`: the Stage 0 projects that these
+            billing answers create, in `stage0_projects` order, then the
+            workload unless the regime skips it.
+
+        Raises:
+            RepoError: If the stage code does not match expectations.
+        """
+        resources = []
+        for project in self.created_stage0_projects(
+            no_iam=no_iam, is_org_level=is_org_level
+        ):
+            project_id = naming.stage0_project_id(prefix, project.name)
+            resources.append(
+                BillingResource(
+                    kind=BillingResourceKind.PROJECT,
+                    address=project.address,
+                    name=project_id,
+                    create=(
+                        f"project {project_id} linked to the billing account"
+                    ),
+                    import_id=project_id,
+                )
+            )
+        workload = self.assured_workload()
+        if workload.created(regime):
+            name = naming.workload_folder_name(prefix)
+            org = org_id or "<org_id>"
+            resources.append(
+                BillingResource(
+                    kind=BillingResourceKind.WORKLOAD,
+                    address=workload.address,
+                    name=name,
+                    create=(
+                        f"{regime} workload {name} in {location} with the "
+                        "billing account, violation notifications enabled, "
+                        f"and a consumer folder named {name}"
+                    ),
+                    import_id=(
+                        f"organizations/{org}/locations/{location}/"
+                        "workloads/<workload_id>"
+                    ),
+                )
+            )
+        return resources
 
     def project_deletion_policy_keys(self):
         """Maps each Stage 0 project module to its deletion policy key.

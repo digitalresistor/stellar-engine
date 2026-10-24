@@ -54,6 +54,16 @@ BILLING_ADMIN_ROLE = "roles/billing.admin"
 # Lets Stage 0 create projects on a billing account whose IAM it does not
 # manage, which is what Billing Account User grants.
 BILLING_LINK_PERMISSION = "billing.resourceAssociations.create"
+BILLING_ADMIN = "Billing Account Administrator (roles/billing.admin)"
+BILLING_USER = "Billing Account User (roles/billing.user)"
+BILLING_COSTS_MANAGER = (
+    "Billing Account Costs Manager (roles/billing.costsManager)"
+)
+PRECREATE_CHECK = "billing.precreate"
+# Points a billing FAIL at the check that lists what to pre-create instead.
+_PRECREATE_HINT = (
+    f"or pre-create the resources that the {PRECREATE_CHECK} check lists"
+)
 IMPERSONATION_ENV_VARS = (
     "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT",
     "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
@@ -74,6 +84,10 @@ class Context:
         environ: Process environment, for impersonation variables.
         org: Organization resolved by the organization check.
         principal: Identity resolved by the identity check.
+        billing_access: Whether the deploying identity holds the billing
+            permissions Stage 0 needs, as the billing role check or the
+            project billing link check found. None when no check tested
+            them or a test failed.
     """
 
     inputs: inputs_lib.PreflightInputs
@@ -83,6 +97,7 @@ class Context:
     environ: Mapping[str, str]
     org: api.Organization | None = None
     principal: api.Principal | None = None
+    billing_access: bool | None = None
 
     @property
     def domain(self):
@@ -565,14 +580,29 @@ def _role_results(ctx):
                 )
             )
             continue
-        results.append(
-            _role_result(role, testable, billing_granted, "billing account")
-        )
+        if testable:
+            ctx.billing_access = testable <= set(billing_granted)
+        item = _role_result(role, testable, billing_granted, "billing account")
+        # With billing_mode "org", Stage 0 grants billing roles on the
+        # organization, so it needs the role only to create resources.
+        if (
+            item.status == Status.FAIL
+            and ctx.billing_access is False
+            and _stage0_precreated(ctx)
+        ):
+            item = _downgraded(item)
+        results.append(item)
     return results
 
 
 def check_billing(ctx):
-    """Checks the billing account and the bootstrap project's billing link."""
+    """Checks the billing account, project linking and pre-created resources.
+
+    The `billing.precreate` result lists the Stage 0 resources that need
+    billing access at creation when the deploying identity lacks it. When
+    import blocks adopt every one of them, Stage 0 needs no billing access,
+    so the account and link failures become warnings.
+    """
     category = Category.BILLING
     account_id = ctx.inputs.billing_account
     if account_id is None:
@@ -582,70 +612,103 @@ def check_billing(ctx):
                 category,
                 "Billing account",
                 "--billing-account",
-            )
+            ),
+            _skip(
+                PRECREATE_CHECK,
+                category,
+                "Pre-created resources",
+                "--billing-account",
+            ),
         ]
+    account, denied = _billing_account_result(ctx, account_id)
+    covers = [account] if denied else []
+    results = [account]
+    if ctx.inputs.billing_no_iam:
+        link = _billing_link_result(ctx, account_id)
+        if ctx.billing_access is False:
+            covers.append(link)
+        results.append(link)
+    results.append(_billing_project_result(ctx, account_id))
+    precreate, covered = _precreate_result(ctx, account_id)
+    if covered:
+        results = [
+            _downgraded(item) if item in covers else item for item in results
+        ]
+    results.append(precreate)
+    return results
+
+
+def _billing_account_result(ctx, account_id):
+    """Checks that the billing account exists and is open.
+
+    Returns:
+        The result, and whether the lookup failed for lack of access.
+    """
     # The ID hint only helps when the lookup worked; a failed lookup already
     # explains its own fix in the detail.
     remedy = "Check the ID with `gcloud billing accounts list`."
+    denied = False
     try:
         account = ctx.cloud.get_billing_account(account_id)
+    except api.ApiDisabledError as error:
+        account, remedy = None, None
+        detail = f"Cannot read billing account {account_id}: {error}"
+    except api.AccessDeniedError as error:
+        account, denied = None, True
+        detail = f"Cannot read billing account {account_id}: {error}"
+        remedy = (
+            "Grant the deploying identity access to the billing account, "
+            f"{_PRECREATE_HINT}."
+        )
     except api.CloudError as error:
         account, remedy = None, None
         detail = f"Cannot read billing account {account_id}: {error}"
     else:
         detail = f"Billing account {account_id} does not exist."
-    if account is None or not account.is_open:
-        if account is not None:
-            detail = f"Billing account {account_id} is closed."
-        results = [
-            CheckResult(
-                "billing.account",
-                category,
-                "Billing account",
-                Status.FAIL,
-                detail,
-                remedy=remedy,
-                doc=DOC_BOOTSTRAP,
-            )
-        ]
-    else:
-        results = [
-            CheckResult(
-                "billing.account",
-                category,
-                "Billing account",
-                Status.PASS,
-                f"Billing account {account_id} is open.",
-                doc=DOC_BOOTSTRAP,
-            )
-        ]
-    if ctx.inputs.billing_no_iam:
-        results.append(_billing_link_result(ctx, account_id))
+    if account is not None and account.is_open:
+        return CheckResult(
+            "billing.account",
+            Category.BILLING,
+            "Billing account",
+            Status.PASS,
+            f"Billing account {account_id} is open.",
+            doc=DOC_BOOTSTRAP,
+        ), denied
+    if account is not None:
+        detail = f"Billing account {account_id} is closed."
+    return CheckResult(
+        "billing.account",
+        Category.BILLING,
+        "Billing account",
+        Status.FAIL,
+        detail,
+        remedy=remedy,
+        doc=DOC_BOOTSTRAP,
+    ), denied
+
+
+def _billing_project_result(ctx, account_id):
+    """Checks that the bootstrap project bills to the billing account."""
+    category = Category.BILLING
     project = ctx.inputs.bootstrap_project
     if project is None:
-        results.append(
-            _skip(
-                "billing.project",
-                category,
-                "Bootstrap project billing",
-                "--project",
-            )
+        return _skip(
+            "billing.project",
+            category,
+            "Bootstrap project billing",
+            "--project",
         )
-        return results
     try:
         link = ctx.cloud.project_billing(project)
     except api.CloudError as error:
-        results.append(
-            CheckResult(
-                "billing.project",
-                category,
-                "Bootstrap project billing",
-                Status.FAIL,
-                f"Cannot read the billing link of {project}: {error}",
-                doc=DOC_BOOTSTRAP,
-            )
+        return CheckResult(
+            "billing.project",
+            category,
+            "Bootstrap project billing",
+            Status.FAIL,
+            f"Cannot read the billing link of {project}: {error}",
+            doc=DOC_BOOTSTRAP,
         )
-        return results
     linked = link.enabled and link.account_id == account_id
     if linked:
         detail = f"{project} is billed to {account_id}."
@@ -653,21 +716,18 @@ def check_billing(ctx):
         detail = f"{project} is billed to {link.account_id}, not {account_id}."
     else:
         detail = f"{project} has no billing account."
-    results.append(
-        CheckResult(
-            "billing.project",
-            category,
-            "Bootstrap project billing",
-            Status.PASS if linked else Status.FAIL,
-            detail,
-            remedy=(
-                f"Run `gcloud billing projects link {project} "
-                f"--billing-account={account_id}`."
-            ),
-            doc=DOC_BOOTSTRAP,
-        )
+    return CheckResult(
+        "billing.project",
+        category,
+        "Bootstrap project billing",
+        Status.PASS if linked else Status.FAIL,
+        detail,
+        remedy=(
+            f"Run `gcloud billing projects link {project} "
+            f"--billing-account={account_id}`."
+        ),
+        doc=DOC_BOOTSTRAP,
     )
-    return results
 
 
 def _billing_link_result(ctx, account_id):
@@ -689,7 +749,8 @@ def _billing_link_result(ctx, account_id):
             f"Cannot test project linking on the billing account: {error}",
             doc=DOC_BOOTSTRAP,
         )
-    if BILLING_LINK_PERMISSION in granted:
+    ctx.billing_access = BILLING_LINK_PERMISSION in granted
+    if ctx.billing_access:
         return CheckResult(
             "billing.link",
             Category.BILLING,
@@ -706,11 +767,256 @@ def _billing_link_result(ctx, account_id):
         f"The deploying identity cannot link new projects to {account_id}, "
         f"because it lacks {BILLING_LINK_PERMISSION}.",
         remedy=(
-            "Ask a billing account administrator to grant Billing Account "
-            "User (roles/billing.user) on the billing account."
+            f"Ask a billing account administrator to grant {BILLING_USER} "
+            f"on the billing account, {_PRECREATE_HINT}."
         ),
         doc=DOC_BOOTSTRAP,
     )
+
+
+def _downgraded(item):
+    """Turns a billing access FAIL into a WARN once Stage 0 needs no access."""
+    return dataclasses.replace(
+        item,
+        status=Status.WARN,
+        detail=(
+            f"{item.detail.rstrip('.')}. Stage 0 needs no billing access, "
+            "because the resources that need it are pre-created. Stages 1 "
+            "to 3 still link new projects to the billing account, see "
+            f"{PRECREATE_CHECK}."
+        ),
+        remedy=None,
+    )
+
+
+def _billing_requirement(ctx):
+    """Returns the billing role and permission wording Stage 0 needs."""
+    if ctx.inputs.billing_no_iam:
+        return BILLING_USER, BILLING_LINK_PERMISSION
+    return BILLING_ADMIN, BILLING_ADMIN
+
+
+def _later_stages_note(ctx):
+    """Names the later stages that link projects to the billing account.
+
+    Stage 1 creates the tenant projects, and Stages 2 and 3 create the
+    networking and security projects, each through the `google.billing`
+    provider that the `billing_override` answer moves to a user account.
+    """
+    imported = set(ctx.inputs.imported_project_ids)
+    tenants = [
+        pid for pid in ctx.inputs.tenant_project_ids if pid not in imported
+    ]
+    note = ""
+    if tenants:
+        note = (
+            " Stage 1 also links these tenant projects to the billing "
+            f"account: {', '.join(tenants)}."
+        )
+    return note + (
+        " Stages 2 and 3 link their networking and security projects to the "
+        "billing account too, so set the billing_override answer for these "
+        "stages to run the linkage as a user with billing access."
+    )
+
+
+def _billing_resources(ctx):
+    """Returns the Stage 0 resources that need billing access to create."""
+    inputs = ctx.inputs
+    return ctx.repo.billing_resources(
+        prefix=inputs.prefix,
+        regime=inputs.regime,
+        location=inputs.compliance_location or inputs.region or "<location>",
+        no_iam=inputs.billing_no_iam,
+        is_org_level=inputs.billing_is_org_level,
+        org_id=ctx.org.org_id if ctx.org else inputs.org_id,
+    )
+
+
+def _precreate_blockers(ctx, resources):
+    """Returns why Stage 0 needs billing access even when imports adopt all.
+
+    Args:
+        ctx: The preflight context.
+        resources: Result of `_billing_resources`.
+
+    Returns:
+        One sentence per Stage 0 use of the billing account that
+        pre-creation cannot replace, empty when there is none.
+    """
+    inputs = ctx.inputs
+    found = []
+    if repo_lib.billing_iam_on_account(
+        no_iam=inputs.billing_no_iam, is_org_level=inputs.billing_is_org_level
+    ):
+        found.append(
+            "Stage 0 grants roles on the billing account itself, because "
+            "billing.no_iam is false and billing.is_org_level is false, "
+            f"which needs {BILLING_ADMIN}."
+        )
+    if inputs.billing_budget:
+        found.append(
+            f"Stage 0 creates the {repo_lib.BUDGET_MODULE} budget on the "
+            "billing account, because the budget.amount answer is set, which "
+            f"needs {BILLING_ADMIN} or {BILLING_COSTS_MANAGER}."
+        )
+    workload = ctx.repo.assured_workload()
+    if workload.replaced_on_import and any(
+        item.address == workload.address for item in resources
+    ):
+        fields = ", ".join(workload.replaced_on_import)
+        found.append(
+            "Stage 0 cannot adopt a pre-created Assured Workloads workload, "
+            f"because organization.tf sets {fields} without listing it in "
+            "lifecycle.ignore_changes, and the Assured Workloads API never "
+            "returns it, so the import plans a replacement that needs "
+            "billing access."
+        )
+    return found
+
+
+def _stage0_precreated(ctx):
+    """Returns whether Stage 0 needs no billing access for these inputs.
+
+    That holds when import blocks adopt every resource that needs billing
+    access at creation and nothing else in Stage 0 uses the account.
+    """
+    inputs = ctx.inputs
+    if inputs.prefix is None or inputs.regime is None:
+        return False
+    resources = _billing_resources(ctx)
+    imported = set(inputs.imported_addresses)
+    return all(
+        item.address in imported for item in resources
+    ) and not _precreate_blockers(ctx, resources)
+
+
+def _precreate_result(ctx, account_id):
+    """Lists the Stage 0 resources to pre-create without billing access.
+
+    Each Stage 0 project links to the billing account, and the Assured
+    Workloads API only creates a workload for a caller that can use the
+    billing account. A deployer without that access needs someone who has
+    it to create these resources, so Stage 0 imports them instead.
+
+    Returns:
+        The result, and whether Stage 0 needs no billing access because
+        import blocks adopt every listed resource while the deploying
+        identity lacks that access, which makes the billing access failures
+        harmless for Stage 0.
+    """
+    check_id, title = PRECREATE_CHECK, "Pre-created resources"
+    category = Category.BILLING
+    inputs = ctx.inputs
+    role, requirement = _billing_requirement(ctx)
+    if ctx.billing_access:
+        return CheckResult(
+            check_id,
+            category,
+            title,
+            Status.PASS,
+            "No pre-creation is needed, because the deploying identity "
+            f"holds {requirement} on {account_id}.",
+            doc=DDG_STAGE0,
+        ), False
+    if inputs.prefix is None or inputs.regime is None:
+        return _skip(check_id, category, title, "--prefix and --regime"), False
+    if ctx.billing_access is None:
+        if not inputs.billing_no_iam and ctx.org is None:
+            return _skip(check_id, category, title, "--org"), False
+        tested = (
+            "billing.link"
+            if inputs.billing_no_iam
+            else f"iam.{BILLING_ADMIN_ROLE}"
+        )
+        return CheckResult(
+            check_id,
+            category,
+            title,
+            Status.SKIP,
+            "Not checked, because preflight could not test the billing "
+            f"permissions; see the {tested} check.",
+        ), False
+    resources = _billing_resources(ctx)
+    imported = set(inputs.imported_addresses)
+    missing = [item for item in resources if item.address not in imported]
+    blockers = _precreate_blockers(ctx, resources)
+    lacks = f"The deploying identity lacks {requirement} on {account_id}"
+    if not missing and not blockers:
+        return CheckResult(
+            check_id,
+            category,
+            title,
+            Status.PASS,
+            f"{lacks}, and import blocks adopt every Stage 0 resource that "
+            "needs it: "
+            + ", ".join(item.name for item in resources)
+            + "."
+            + _later_stages_note(ctx),
+            doc=DDG_STAGE0,
+        ), True
+    listed = "; ".join(
+        f"{item.create}, imported as {item.address} with ID {item.import_id}"
+        for item in missing
+    )
+    detail = (
+        lacks
+        + (
+            f", so Stage 0 cannot create these resources: {listed}."
+            if missing
+            else ". Import blocks adopt every Stage 0 resource that needs it."
+        )
+        + "".join(f" {sentence}" for sentence in blockers)
+        + _later_stages_note(ctx)
+    )
+    who = (
+        ctx.principal.email
+        if ctx.principal and ctx.principal.email
+        else "the deploying identity"
+    )
+    remedy = (
+        f"Grant {role} on billing account {account_id} to {who}, or have "
+        "someone with that access pre-create the listed resources, add each "
+        f"one to imports.{paths.BOOTSTRAP} in answers.yaml with its import "
+        "ID, and run `stellar render`."
+    )
+    workload = ctx.repo.assured_workload()
+    if any(item.address == workload.address for item in missing):
+        remedy += (
+            " Create the Assured Workloads workload with the billing account, "
+            "because the API requires one, and with violation notifications "
+            "enabled to match organization.tf."
+        )
+    if workload.replaced_on_import and any(
+        item.address == workload.address for item in resources
+    ):
+        remedy += (
+            " A pre-created workload helps only once organization.tf lists "
+            f"{', '.join(workload.replaced_on_import)} in the "
+            "lifecycle.ignore_changes of the workload."
+        )
+    if repo_lib.billing_iam_on_account(
+        no_iam=inputs.billing_no_iam, is_org_level=inputs.billing_is_org_level
+    ):
+        remedy += (
+            " Set billing.no_iam to true so Stage 0 manages no billing IAM, "
+            "unless you grant that role."
+        )
+    if inputs.billing_budget:
+        remedy += (
+            " Remove the budget.amount answer and create the budget after "
+            "Stage 0 as a user with billing access, unless you grant that "
+            "role."
+        )
+    return CheckResult(
+        check_id,
+        category,
+        title,
+        Status.FAIL,
+        detail,
+        remedy=remedy,
+        doc=DDG_STAGE0,
+    ), False
 
 
 def check_project(ctx):
@@ -1145,23 +1451,52 @@ def check_naming(ctx):
         )
     )
     if ctx.org is not None:
-        folder = naming.workload_folder_name(prefix)
         results.append(
             _guarded(
                 "naming.folder",
                 "Assured Workloads folder",
-                lambda: _collision(
-                    ctx,
-                    "naming.folder",
-                    "Assured Workloads folder",
-                    [folder]
-                    if ctx.cloud.find_folders(ctx.org.org_id, folder)
-                    else [],
-                    "folders",
-                ),
+                lambda: _folder_result(ctx, prefix),
             )
         )
     return results
+
+
+def _folder_result(ctx, prefix):
+    """Checks the Assured Workloads folder name for a collision.
+
+    The workload creates the folder, so when an import block adopts a
+    pre-created workload, an existing folder of that name is expected.
+    """
+    check_id, title = "naming.folder", "Assured Workloads folder"
+    folder = naming.workload_folder_name(prefix)
+    exists = bool(ctx.cloud.find_folders(ctx.org.org_id, folder))
+    address = ctx.repo.assured_workload().address
+    if address not in ctx.inputs.imported_addresses:
+        return _collision(
+            ctx, check_id, title, [folder] if exists else [], "folders"
+        )
+    if exists:
+        return CheckResult(
+            check_id,
+            Category.NAMING,
+            title,
+            Status.PASS,
+            f"{folder} is pre-created; Stage 0 imports the workload.",
+        )
+    return CheckResult(
+        check_id,
+        Category.NAMING,
+        title,
+        Status.WARN,
+        f"imports.{paths.BOOTSTRAP} adopts the workload {address}, but no "
+        f"folder named {folder} is visible to this identity.",
+        remedy=(
+            "Confirm that the pre-created workload exists and that its "
+            f"consumer folder is named {folder}, because the import fails "
+            "otherwise."
+        ),
+        doc=DDG_STAGE0,
+    )
 
 
 def _holder_member(ctx, holder, groups):

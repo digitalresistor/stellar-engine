@@ -84,7 +84,8 @@ def warnings(
 
     Returns:
         Readable sentences, one per import into a project that Stage 0
-        skips for the billing answers.
+        skips for the billing answers or into a workload that it skips for
+        the regime.
     """
     stage = paths.resolve_stage(stage)
     if stage != paths.BOOTSTRAP:
@@ -100,13 +101,23 @@ def warnings(
         for project in repo.stage0_projects()
         if project not in created
     ]
-    return [
+    imports = answers.imports.get(stage, {})
+    found = [
         f"imports.{stage}: {address} targets the billing export project, "
         f"which Stage 0 only creates when {repo_lib.BILLING_EXPORT_CONDITION}"
         ", so the import would fail."
-        for address in answers.imports.get(stage, {})
+        for address in imports
         if address.startswith(tuple(skipped))
     ]
+    workload = repo.assured_workload()
+    regime = answers.compliance.regime
+    if workload.address in imports and not workload.created(regime):
+        found.append(
+            f"imports.{stage}: {workload.address} targets the Assured "
+            f"Workloads workload, which Stage 0 does not create for regime "
+            f"{regime}, so the import would fail."
+        )
+    return found
 
 
 def _module_prefix(project):

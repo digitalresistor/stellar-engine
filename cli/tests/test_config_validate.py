@@ -307,3 +307,49 @@ def test_existing_org_policies_accept_any_regime(repo):
     )
     answers.compliance.regime = "FEDRAMP_MODERATE"
     assert validate.problems(answers, repo) == []
+
+
+WORKLOAD = "google_assured_workloads_workload.primary[0]"
+WORKLOAD_ID = (
+    f"organizations/{conftest.ORG_ID}/locations/us-east4/workloads/abc123"
+)
+
+
+def test_workload_import_is_valid(repo):
+    assert validate.import_address_problems(WORKLOAD) == []
+    answers = helpers.minimal_answers(
+        imports={"0-bootstrap": {WORKLOAD: WORKLOAD_ID}}
+    )
+    assert validate.problems(answers, repo) == []
+
+
+def test_workload_import_follows_the_compliance_location(repo):
+    answers = helpers.minimal_answers(
+        compliance={"regime": "IL5", "location": "US"},
+        imports={
+            "0-bootstrap": {
+                WORKLOAD: f"organizations/{conftest.ORG_ID}/locations/us/"
+                "workloads/abc123"
+            }
+        },
+    )
+    assert validate.problems(answers, repo) == []
+
+
+@pytest.mark.parametrize(
+    "import_id",
+    [
+        "abc123",
+        "organizations/999999999999/locations/us-east4/workloads/abc123",
+        f"organizations/{conftest.ORG_ID}/locations/us-west1/workloads/abc",
+        f"organizations/{conftest.ORG_ID}/locations/us-east4/workloads/",
+    ],
+)
+def test_workload_import_id_must_match(repo, import_id):
+    answers = helpers.minimal_answers(
+        imports={"0-bootstrap": {WORKLOAD: import_id}}
+    )
+    problems = validate.problems(answers, repo)
+    assert len(problems) == 1
+    assert problems[0].startswith(f"imports.0-bootstrap: {WORKLOAD}")
+    assert "would replace the imported workload" in problems[0]
