@@ -367,10 +367,12 @@ class LiveCloudApi:
     @_translated
     def find_folders(self, org_id, display_name):
         """See `CloudApi.find_folders`."""
+        # A deleted folder keeps its display name for 30 days but does not
+        # block a new folder with the same name, so only active ones count.
         pager = self._folders.search_folders(
             query=(
                 f'displayName="{display_name}" AND '
-                f"parent=organizations/{org_id}"
+                f"parent=organizations/{org_id} AND state=ACTIVE"
             )
         )
         return [folder.name for folder in pager]

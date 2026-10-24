@@ -204,7 +204,7 @@ class CloudApi(Protocol):
         ...
 
     def find_folders(self, org_id: str, display_name: str) -> list[str]:
-        """Returns folder names in an org with an exact display name."""
+        """Returns active folder names in an org with an exact display name."""
         ...
 
     def custom_role_exists(self, org_id: str, role_id: str) -> bool:

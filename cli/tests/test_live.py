@@ -198,3 +198,25 @@ def test_visible_project_state_queries_soft_deleted(monkeypatch):
         "id:abc-prod-iac-core-0",
         "id:abc-prod-iac-core-0 state:DELETE_REQUESTED",
     ]
+
+
+def test_find_folders_ignores_deleted_folders(monkeypatch):
+    queries = []
+
+    class _Folder:
+        name = "folders/111"
+
+    class Folders:
+        def search_folders(self, query):
+            queries.append(query)
+            return [_Folder()]
+
+    cloud = live.LiveCloudApi()
+    monkeypatch.setitem(cloud.__dict__, "_folders", Folders())
+    assert cloud.find_folders("123456789012", "StellarEngine-abc") == [
+        "folders/111"
+    ]
+    assert queries == [
+        'displayName="StellarEngine-abc" AND '
+        "parent=organizations/123456789012 AND state=ACTIVE"
+    ]
