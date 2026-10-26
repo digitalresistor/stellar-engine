@@ -452,6 +452,7 @@ def test_env_list_use_show(runner, isolated_home):
     assert "Environment: aaa (current)" in show.output
     assert "KMS protection level: HSM" in show.output
     assert "aaa-prod-iac-core-0" in show.output
+    assert "Stage 0 phase: bootstrap" in show.output
     other = _invoke(runner, "env", "show", "--prefix", "bbb")
     assert "Environment: bbb\n" in other.output
 
@@ -539,10 +540,16 @@ def test_render_creates_workspace_tfvars_and_imports(
     assert f"created    {tfvars}" in outcome.output
     assert f"created    {imports_file}" in outcome.output
     assert f"terraform -chdir={workspace} init" in outcome.output
-    assert (
-        f"terraform -chdir={workspace} plan -var bootstrap_user="
-        "admin@example.com"
-    ) in outcome.output
+    phase_file = workspace / "0-bootstrap-phase.auto.tfvars"
+    assert 'bootstrap_user = "admin@example.com"' in phase_file.read_text()
+    assert conftest.mode(phase_file) == 0o600
+    assert f"created    {phase_file}" in outcome.output
+    assert f"terraform -chdir={workspace} plan -out=s0.tfplan" in (
+        outcome.output
+    )
+    assert f"terraform -chdir={workspace} apply s0.tfplan" in outcome.output
+    assert "-var" not in outcome.output
+    assert "stellar init --set stage0_phase=final" in outcome.output
     assert "1-resman waits for Stage 0 outputs" in outcome.output
 
 
@@ -552,7 +559,8 @@ def test_render_rerun_is_unchanged(runner, isolated_home, fake_tools):
     again = _invoke(runner, "render")
     assert again.exit_code == 0, again.output
     assert "created" not in again.output
-    assert again.output.count("  unchanged  ") == 2
+    # The two tfvars files and the Stage 0 phase file.
+    assert again.output.count("  unchanged  ") == 3
 
 
 def test_render_one_stage_by_alias(runner, isolated_home, fake_tools):
@@ -750,6 +758,8 @@ def test_rendered_bootstrap_workspace_validates(runner, isolated_home):
     assert outcome.exit_code == 0, outcome.output
     assert _invoke(runner, "render", "--stage", "0").exit_code == 0
     workspace = _workspace(isolated_home, "0-bootstrap")
+    # The phase file sets bootstrap_user, so no command passes -var.
+    assert (workspace / "0-bootstrap-phase.auto.tfvars").is_file()
     env = {**os.environ, "TF_IN_AUTOMATION": "1"}
     for command in (
         ["init", "-backend=false", "-input=false"],
@@ -1071,3 +1081,130 @@ def test_render_and_show_keep_imported_projects(
     assert show.exit_code == 0, show.output
     assert "    tst-prod-iac-core-0  ABANDON" in show.output
     assert "    tst-prod-audit-logs-0  DELETE" in show.output
+
+
+def _phase_file(home):
+    return _workspace(home, "0-bootstrap") / "0-bootstrap-phase.auto.tfvars"
+
+
+def test_render_final_phase_removes_the_phase_file(
+    runner, isolated_home, fake_tools
+):
+    assert _init(runner).exit_code == 0
+    assert _invoke(runner, "render").exit_code == 0
+    phase_file = _phase_file(isolated_home)
+    assert phase_file.is_file()
+    switch = _invoke(
+        runner, "init", "--non-interactive", "--set", "stage0_phase=final"
+    )
+    assert switch.exit_code == 0, switch.output
+    outcome = _invoke(runner, "render")
+    assert outcome.exit_code == 0, outcome.output
+    assert f"removed    {phase_file}" in outcome.output
+    assert not phase_file.exists()
+    workspace = _workspace(isolated_home, "0-bootstrap")
+    assert f"terraform -chdir={workspace} plan -out=s0.tfplan" in (
+        outcome.output
+    )
+    assert f"terraform -chdir={workspace} apply s0.tfplan" in outcome.output
+    assert "stage0_phase" not in outcome.output
+    again = _invoke(runner, "render")
+    assert str(phase_file) not in again.output
+    show = _invoke(runner, "env", "show")
+    assert "Stage 0 phase: final" in show.output
+
+
+def test_render_updates_the_phase_file_for_a_new_user(
+    runner, isolated_home, fake_tools
+):
+    assert _init(runner).exit_code == 0
+    assert _invoke(runner, "render").exit_code == 0
+    change = _invoke(
+        runner,
+        "init",
+        "--non-interactive",
+        "--set",
+        "bootstrap_user=ops@example.com",
+    )
+    assert change.exit_code == 0, change.output
+    outcome = _invoke(runner, "render", "--stage", "0")
+    phase_file = _phase_file(isolated_home)
+    assert f"updated    {phase_file}" in outcome.output
+    assert "ops@example.com" in phase_file.read_text()
+
+
+def test_render_refuses_a_phase_file_it_did_not_write(
+    runner, isolated_home, fake_tools
+):
+    assert _init(runner).exit_code == 0
+    assert _invoke(runner, "render").exit_code == 0
+    phase_file = _phase_file(isolated_home)
+    phase_file.write_text('bootstrap_user = "someone@example.com"\n')
+    for args in (["render"], ["render", "--diff"]):
+        outcome = _invoke(runner, *args)
+        assert outcome.exit_code == 2, outcome.output
+        assert f"stellar did not write {phase_file}" in outcome.output
+    assert phase_file.read_text() == 'bootstrap_user = "someone@example.com"\n'
+
+
+def test_render_refuses_a_foreign_phase_file_before_any_write(
+    runner, isolated_home, fake_tools
+):
+    assert _init(runner).exit_code == 0
+    assert _invoke(runner, "render").exit_code == 0
+    tfvars = _workspace(isolated_home, "0-bootstrap") / "terraform.tfvars"
+    before = tfvars.read_text()
+    change = _invoke(
+        runner,
+        "init",
+        "--non-interactive",
+        "--set",
+        "alert_email=changed@example.com",
+    )
+    assert change.exit_code == 0, change.output
+    _phase_file(isolated_home).write_text('bootstrap_user = "x@example.com"\n')
+    outcome = _invoke(runner, "render")
+    assert outcome.exit_code == 2, outcome.output
+    assert tfvars.read_text() == before
+
+
+def test_render_diff_shows_the_phase_file(runner, isolated_home, fake_tools):
+    assert _init(runner).exit_code == 0
+    outcome = _invoke(runner, "render", "--diff")
+    assert outcome.exit_code == 0, outcome.output
+    assert '+bootstrap_user = "admin@example.com"' in outcome.output
+    assert not _phase_file(isolated_home).exists()
+    assert _invoke(runner, "render").exit_code == 0
+    switch = _invoke(
+        runner, "init", "--non-interactive", "--set", "stage0_phase=final"
+    )
+    assert switch.exit_code == 0, switch.output
+    removal = _invoke(runner, "render", "--diff")
+    assert '-bootstrap_user = "admin@example.com"' in removal.output
+    assert _phase_file(isolated_home).is_file()
+
+
+def test_init_requires_bootstrap_user_in_the_bootstrap_phase(
+    runner, isolated_home
+):
+    outcome = runner.invoke(
+        cli.app,
+        [
+            "init",
+            "--non-interactive",
+            "--repo",
+            str(conftest.REPO_ROOT),
+            "--prefix",
+            "tst",
+            *[
+                arg
+                for assignment in REQUIRED_SETS
+                if not assignment.startswith("bootstrap_user=")
+                for arg in ("--set", assignment)
+            ],
+        ],
+    )
+    assert outcome.exit_code == 2, outcome.output
+    assert "bootstrap_user is required while stage0_phase is bootstrap" in (
+        outcome.output
+    )

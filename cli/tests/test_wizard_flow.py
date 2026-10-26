@@ -138,10 +138,35 @@ def test_offline_fresh_run_needs_typed_values(repo):
     script[4] = conftest.BILLING
     script[8] = conftest.PROJECT
     script[14] = f"alerts@{conftest.DOMAIN}"
+    script[16] = f"admin@{conftest.DOMAIN}"
     result, _ = _run({}, script, repo, discovery.Discovered())
     assert result["organization"]["id"] == conftest.ORG_ID
     assert result["alert_email"] == f"alerts@{conftest.DOMAIN}"
+    assert result["bootstrap_user"] == f"admin@{conftest.DOMAIN}"
+
+
+def test_bootstrap_phase_requires_a_bootstrap_user(repo):
+    script = list(FRESH)
+    script[1:4] = [conftest.ORG_ID, conftest.DOMAIN, conftest.CUSTOMER_ID]
+    script[4] = conftest.BILLING
+    script[8] = conftest.PROJECT
+    script[14] = f"alerts@{conftest.DOMAIN}"
+    # A blank bootstrap user fails validation, so the prompt asks again.
+    script[16:17] = ["", f"admin@{conftest.DOMAIN}"]
+    result, prompter = _run({}, script, repo, discovery.Discovered())
+    assert result["bootstrap_user"] == f"admin@{conftest.DOMAIN}"
+    assert "Enter an email address such as admin@example.com." in (
+        prompter.notes
+    )
+
+
+def test_final_phase_accepts_a_blank_bootstrap_user(repo):
+    data = helpers.minimal_data(stage0_phase="final", bootstrap_user=None)
+    result, prompter = _run(
+        data, [None, None, ""], repo, discovery.Discovered(), ["contacts"]
+    )
     assert "bootstrap_user" not in result
+    assert prompter.asked[-1].endswith(", blank for none")
 
 
 def test_rerun_keeps_existing_answers(repo, discovered):
@@ -389,7 +414,11 @@ def test_service_account_is_not_a_contact_default(repo, cloud, local_tools):
     local_tools.account = "sa@example-bootstrap.iam.gserviceaccount.com"
     found = discovery.discover(cloud, local_tools)
     result, prompter = _run(
-        helpers.minimal_data(alert_email=None),
+        # The final phase allows a blank bootstrap user, so the test sees
+        # that the service account is not its default either.
+        helpers.minimal_data(
+            alert_email=None, bootstrap_user=None, stage0_phase="final"
+        ),
         [None, f"alerts@{conftest.DOMAIN}", None, None],
         repo,
         found,

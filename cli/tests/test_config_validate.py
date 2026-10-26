@@ -353,3 +353,18 @@ def test_workload_import_id_must_match(repo, import_id):
     assert len(problems) == 1
     assert problems[0].startswith(f"imports.0-bootstrap: {WORKLOAD}")
     assert "would replace the imported workload" in problems[0]
+
+
+def test_bootstrap_phase_requires_bootstrap_user(repo):
+    answers = helpers.minimal_answers(bootstrap_user=None)
+    found = validate.problems(answers, repo)
+    assert len(found) == 1
+    assert found[0].startswith(
+        "bootstrap_user is required while stage0_phase is bootstrap"
+    )
+    assert "first Stage 0 apply" in found[0]
+
+
+def test_final_phase_needs_no_bootstrap_user(repo):
+    answers = helpers.minimal_answers(bootstrap_user=None, stage0_phase="final")
+    assert validate.problems(answers, repo) == []

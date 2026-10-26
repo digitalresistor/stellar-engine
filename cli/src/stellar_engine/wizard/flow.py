@@ -493,11 +493,14 @@ def ask_contacts(data: dict, ctx: _Context) -> None:
             validate=_email(optional=True),
         )
         _put(data, "essential_contacts", contacts or None)
+    # The bootstrap phase writes the user into the phase file, so only the
+    # final phase may leave it blank.
+    final = data.get("stage0_phase") == models.STAGE0_FINAL
     bootstrap_user = ctx.prompter.text(
-        "Bootstrap user, the human user of the first Stage 0 apply, blank "
-        "to pass it later",
+        "Bootstrap user, the human user of the first Stage 0 apply"
+        + (", blank for none" if final else ""),
         default=data.get("bootstrap_user") or user,
-        validate=_email(optional=True),
+        validate=_email(optional=final),
     )
     _put(data, "bootstrap_user", bootstrap_user or None)
 

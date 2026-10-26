@@ -162,3 +162,21 @@ def test_resolve_source_missing(tmp_path):
         seed.resolve_source("nope", home)
     with pytest.raises(FileNotFoundError):
         seed.resolve_source(str(tmp_path / "missing.yaml"), home)
+
+
+def test_seed_drops_the_stage0_phase():
+    source = _source(stage0_phase="final")
+    seeded = seed.seed(source)
+    assert "stage0_phase" not in seeded
+    seeded["prefix"] = "new"
+    assert answers_lib.parse(seeded).stage0_phase == models.STAGE0_BOOTSTRAP
+    notes = seed.review_notes(source, None)
+    assert any(
+        "bootstrap stage0_phase" in note and "final Stage 0 apply" in note
+        for note in notes
+    )
+
+
+def test_review_notes_quiet_for_a_bootstrap_source():
+    notes = seed.review_notes(_source(stage0_phase="bootstrap"), None)
+    assert not any("stage0_phase" in note for note in notes)

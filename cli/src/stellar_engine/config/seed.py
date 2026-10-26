@@ -29,6 +29,7 @@ import random
 import string
 
 from stellar_engine import paths
+from stellar_engine.config import models
 from stellar_engine.preflight import regions
 
 # Imports name the source environment's own projects, so carrying them
@@ -37,7 +38,15 @@ from stellar_engine.preflight import regions
 # last scan saw it, so the new environment scans its own.
 # keep_imported_projects is a preference rather than organization state, so
 # it carries and applies once the new environment adds its own imports.
-NEVER_CARRIED = ("prefix", "engine", "imports", "existing_org_policies")
+# stage0_phase records how far the source deployment got, and a new
+# environment always starts with the bootstrap apply.
+NEVER_CARRIED = (
+    "prefix",
+    "engine",
+    "imports",
+    "existing_org_policies",
+    "stage0_phase",
+)
 
 SUFFIX_LENGTH = 4
 _SUFFIX_CHARS = string.ascii_lowercase + string.digits
@@ -77,7 +86,7 @@ def review_notes(source: dict, target_regime: str | None) -> list[str]:
     """
     notes = []
     # The prefix is always asked again and the engine recorded again, so
-    # only the dropped imports and organization policies need a note.
+    # only the dropped imports, organization policies and phase need a note.
     if source.get("imports"):
         notes.append(
             "the copy drops the imports, because they name resources of "
@@ -88,6 +97,12 @@ def review_notes(source: dict, target_regime: str | None) -> list[str]:
             "the copy drops existing_org_policies, because they describe "
             "the organization of the source environment; run stellar "
             "imports scan for this one."
+        )
+    if source.get("stage0_phase") == models.STAGE0_FINAL:
+        notes.append(
+            "the copy starts in the bootstrap stage0_phase, because the "
+            "source environment already ran its final Stage 0 apply; this "
+            "environment runs the first apply with bootstrap_user."
         )
     old_regime = _regime(source)
     if not target_regime or target_regime == old_regime:

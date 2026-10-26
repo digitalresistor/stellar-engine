@@ -144,8 +144,9 @@ def _bootstrap(
     policies = derive.project_deletion_policies(answers, repo)
     if policies:
         values[repo_lib.PROJECT_DELETION_POLICIES] = policies
-    # bootstrap_user is never written: the DDG passes it with -var on the
-    # first apply only, and a stored value would keep the user's grants.
+    # bootstrap_user is never written here: `render.phase` writes it to a
+    # separate file in the bootstrap phase only, so the final phase drops
+    # it without touching this file.
     return values
 
 

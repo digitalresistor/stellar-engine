@@ -34,6 +34,24 @@ def test_minimal_answers_get_defaults():
     assert answers.billing.no_iam is False
     assert answers.imports == {}
     assert answers.overrides == {}
+    assert answers.stage0_phase == models.STAGE0_BOOTSTRAP
+
+
+@pytest.mark.parametrize("phase", ["bootstrap", "final"])
+def test_stage0_phase_accepts_both_phases(phase):
+    assert helpers.minimal_answers(stage0_phase=phase).stage0_phase == phase
+
+
+def test_stage0_phase_rejects_other_values():
+    with pytest.raises(pydantic.ValidationError, match="stage0_phase"):
+        helpers.minimal_answers(stage0_phase="first")
+
+
+def test_stage0_phase_schema_describes_the_field():
+    schema = models.Answers.model_json_schema()["properties"]["stage0_phase"]
+    assert schema["enum"] == ["bootstrap", "final"]
+    assert schema["default"] == "bootstrap"
+    assert "bootstrap_user" in schema["description"]
 
 
 def test_default_envs_are_not_shared():

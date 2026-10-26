@@ -36,7 +36,8 @@ ID_MAX_LENGTH = 30
 # Keys that stellar owns, so an override would desync the workspace from
 # the environment: the prefix names the env, its workspaces and its import
 # IDs, outputs_location is the env's fast-config folder that Stage 1 links
-# from, and bootstrap_user only goes on the first apply's command line.
+# from, and bootstrap_user only goes into the phase file of the bootstrap
+# phase, see `render.phase`.
 _CLI_OWNED_KEYS = {
     paths.BOOTSTRAP: frozenset(
         {"bootstrap_user", "outputs_location", "prefix"}
@@ -121,6 +122,7 @@ def problems(answers: models.Answers, repo: repo_lib.Repo) -> list[str]:
             f"groups keys {', '.join(unknown)} are not Stage 0 groups; use "
             f"{', '.join(sorted(known_groups))}."
         )
+    found.extend(_phase_problems(answers))
     found.extend(_region_problems(answers))
     found.extend(_tenant_problems(answers, repo))
     for stage, imports in answers.imports.items():
@@ -304,6 +306,22 @@ def _org_policy_problems(answers, repo):
             "exist; remove import_defaults."
         )
     return found
+
+
+def _phase_problems(answers):
+    """Checks that the bootstrap phase names its bootstrap user."""
+    if (
+        answers.stage0_phase != models.STAGE0_BOOTSTRAP
+        or answers.bootstrap_user is not None
+    ):
+        return []
+    return [
+        "bootstrap_user is required while stage0_phase is "
+        f"{models.STAGE0_BOOTSTRAP}, because the first Stage 0 apply grants "
+        "that human user the roles to finish the bootstrap; set it, or set "
+        f"stage0_phase to {models.STAGE0_FINAL} once the state migration is "
+        "done."
+    ]
 
 
 def _region_problems(answers):

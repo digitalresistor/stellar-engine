@@ -52,6 +52,7 @@ from stellar_engine.preflight import inputs as inputs_lib
 from stellar_engine.preflight import report
 from stellar_engine.preflight import runner
 from stellar_engine.render import imports as imports_lib
+from stellar_engine.render import phase as phase_lib
 from stellar_engine.render import stages as stages_lib
 from stellar_engine.render import writer
 from stellar_engine.wizard import discovery
@@ -79,7 +80,7 @@ _EXIT_USAGE = 2
 _EXIT_OVERWRITE_REFUSED = 3
 
 _TFVARS = "terraform.tfvars"
-_BOOTSTRAP_USER_PLACEHOLDER = "USER_EMAIL"
+_STAGE0_PLAN = "s0.tfplan"
 _HOME_SOURCES = {
     paths.HomeSource.FLAG: "from the --home flag",
     paths.HomeSource.ENV: f"from {paths.HOME_ENV_VAR}",
@@ -564,6 +565,7 @@ def env_show(
     engine = answers.engine.path if answers.engine else "not recorded"
     typer.echo(f"Engine: {engine}")
     typer.echo(f"Outputs location: {env.fast_config}")
+    typer.echo(f"Stage 0 phase: {answers.stage0_phase}")
     typer.echo("Workspaces:")
     for stage in paths.STAGES:
         typer.echo(f"  {stage}: {env.workspace(stage)}")
@@ -679,6 +681,22 @@ def _write_imports(workspace, stage, answers):
     return workspace / imports_lib.filename(stage), outcome
 
 
+def _planned_phase(workspace, answers, repository):
+    """Returns the planned Stage 0 phase file text or exits on an error."""
+    try:
+        return phase_lib.planned(workspace, answers, repository)
+    except phase_lib.PhaseFileError as error:
+        _fail(str(error))
+
+
+def _write_phase(workspace, answers, repository):
+    """Writes or removes the Stage 0 phase file and returns what happened."""
+    try:
+        return phase_lib.write(workspace, answers, repository)
+    except phase_lib.PhaseFileError as error:
+        _fail(str(error))
+
+
 def _render_text(stage, answers, session, env, local_tools):
     try:
         rendered = stages_lib.build(stage, answers, session.repo, env)
@@ -699,11 +717,18 @@ def _print_next_steps(stage, workspace, answers, reports):
         return
     typer.echo(f"Next steps for {stage}:")
     typer.echo(f"  {chdir} init")
-    if stage == paths.BOOTSTRAP:
-        user = answers.bootstrap_user or _BOOTSTRAP_USER_PLACEHOLDER
-        typer.echo(f"  {chdir} plan -var bootstrap_user={shlex.quote(user)}")
-    else:
+    if stage != paths.BOOTSTRAP:
         typer.echo(f"  {chdir} plan")
+        return
+    # The phase file sets bootstrap_user, so no command passes -var.
+    typer.echo(f"  {chdir} plan -out={_STAGE0_PLAN}")
+    typer.echo(f"  {chdir} apply {_STAGE0_PLAN}")
+    if answers.stage0_phase == models.STAGE0_BOOTSTRAP:
+        typer.echo(
+            "After this first apply and the state migration, run stellar "
+            f"init --set stage0_phase={models.STAGE0_FINAL} and stellar "
+            "render, then run the same commands for the final apply."
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -727,7 +752,7 @@ def _selected_stages(names):
 
 
 def _render_stage(name, answers, session, env, local_tools, options):
-    """Syncs one workspace and writes its tfvars and import blocks.
+    """Syncs one workspace and writes its tfvars, imports and phase file.
 
     Returns:
         The sync report, summary rows, and False when an edited tfvars file
@@ -742,6 +767,10 @@ def _render_stage(name, answers, session, env, local_tools, options):
             f"{sync.path / conflict} is a real file that shadows the "
             "engine's file of the same name."
         )
+    if name == paths.BOOTSTRAP:
+        # Refuse a foreign phase file before any write, so a refused render
+        # leaves the tfvars and imports files as they were.
+        _planned_phase(sync.path, answers, session.repo)
     text = _render_text(name, answers, session, env, local_tools)
     target = sync.path / _TFVARS
     ok = True
@@ -764,6 +793,17 @@ def _render_stage(name, answers, session, env, local_tools, options):
     imports_target, imports_outcome = _write_imports(sync.path, name, answers)
     if imports_outcome is not None:
         rows.append((name, imports_target, imports_outcome.value, None))
+    if name == paths.BOOTSTRAP:
+        phase_outcome = _write_phase(sync.path, answers, session.repo)
+        if phase_outcome is not None:
+            rows.append(
+                (
+                    name,
+                    sync.path / phase_lib.FILENAME,
+                    phase_outcome.value,
+                    None,
+                )
+            )
     return sync, rows, ok
 
 
@@ -798,7 +838,7 @@ def render(
     home: HomeOption = None,
     repo: RepoOption = None,
 ):
-    """Render the stage workspaces, tfvars and import blocks.
+    """Render the stage workspaces, tfvars, import blocks and phase file.
 
     Each workspace links the engine's stage code and holds the files the
     environment owns, so Terraform runs from it with `-chdir`.
@@ -812,11 +852,7 @@ def render(
             f"answers.yaml records the engine {answers.engine.path}, but "
             f"this render uses {session.repo.root}."
         )
-    for name in selected:
-        for line in imports_lib.warnings(answers, name, session.repo):
-            _warn(line)
-        for line in stages_lib.warnings(answers, name, session.repo):
-            _warn(line)
+    _render_warnings(selected, answers, session, env)
     local_tools = tools_lib.SystemTools()
     if show_diff:
         _render_diff(selected, answers, session, env, local_tools)
@@ -849,6 +885,19 @@ def render(
         _print_next_steps(name, env.workspace(name), answers, reports)
 
 
+def _render_warnings(selected, answers, session, env):
+    """Prints the non-fatal findings about the selected stages."""
+    for name in selected:
+        found = [
+            *imports_lib.warnings(answers, name, session.repo),
+            *stages_lib.warnings(answers, name, session.repo),
+        ]
+        if name == paths.BOOTSTRAP:
+            found += phase_lib.warnings(env.workspace(name), answers)
+        for line in found:
+            _warn(line)
+
+
 def _render_diff(selected, answers, session, env, local_tools):
     """Prints what a render would change, writing nothing."""
     changed = False
@@ -860,10 +909,14 @@ def _render_diff(selected, answers, session, env, local_tools):
         except imports_lib.ImportBlockError as error:
             _fail(str(error))
         imports_target = workspace / imports_lib.filename(name)
-        for target, content in (
+        targets = [
             (workspace / _TFVARS, text),
             (imports_target, imports_text),
-        ):
+        ]
+        if name == paths.BOOTSTRAP:
+            phase_text = _planned_phase(workspace, answers, session.repo)
+            targets.append((workspace / phase_lib.FILENAME, phase_text))
+        for target, content in targets:
             if not content and fsutil.read_text_or_none(target) is None:
                 continue
             changes = writer.diff(target, content)

@@ -87,7 +87,7 @@ class TestIdentity:
         found = by_id(checks.check_identity(make_ctx()))
         bootstrap = found["identity.bootstrap_user"]
         assert bootstrap.status == Status.PASS
-        assert f"-var bootstrap_user={conftest.USER}" in bootstrap.detail
+        assert f"grants {conftest.USER} as" in bootstrap.detail
 
     def test_service_account_without_bootstrap_user_fails(
         self, make_ctx, cloud, local_tools
@@ -107,7 +107,7 @@ class TestIdentity:
         ctx = make_ctx(bootstrap_user="admin@example.com")
         bootstrap = by_id(checks.check_identity(ctx))["identity.bootstrap_user"]
         assert bootstrap.status == Status.PASS
-        assert "-var bootstrap_user=admin@example.com" in bootstrap.detail
+        assert "grants admin@example.com as" in bootstrap.detail
         assert f"Terraform runs as {SA}" in bootstrap.detail
 
     def test_service_account_as_bootstrap_user_fails(self, make_ctx):

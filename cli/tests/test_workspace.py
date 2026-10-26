@@ -116,6 +116,7 @@ def test_sync_leaves_env_files_alone(engine, env):
         "terraform.tfvars": 'prefix = "abc"\n',
         "terraform.tfvars.backup.20261023T000000Z": "old\n",
         "0-bootstrap-imports.tf": "import {}\n",
+        "0-bootstrap-phase.auto.tfvars": 'bootstrap_user = "a@example.com"\n',
         "0-bootstrap-providers.tf": "# remote providers\n",
         "terraform.tfstate": "{}",
         ".terraform.lock.hcl": "# lock\n",

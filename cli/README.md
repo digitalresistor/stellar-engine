@@ -77,21 +77,30 @@ workspace yourself.
 ```bash
 WS=$STELLAR_HOME/envs/abc/fast/stages-aw/0-bootstrap
 terraform -chdir=$WS init
-terraform -chdir=$WS plan -var bootstrap_user=admin@example.com -out=s0.tfplan
+terraform -chdir=$WS plan -out=s0.tfplan
 terraform -chdir=$WS apply s0.tfplan
 ```
 
 - Review the saved plan before you apply it, because the first apply makes
   the organization IAM roles that Stage 0 manages authoritative.
+- No command passes the `-var` option, because the
+  `0-bootstrap-phase.auto.tfvars` file that the render writes sets the
+  `bootstrap_user` variable for the first apply.
 - After the first apply, set the gcloud project to the new
   `<prefix>-prod-iac-core-0` project.
 - Copy the `fast-config/providers/0-bootstrap-providers.tf` file of the
   environment over the `0-bootstrap-providers.tf` file in the workspace.
 - Run `terraform -chdir=$WS init -migrate-state` to move the state into the
   remote bucket.
-- Run `terraform -chdir=$WS apply` without the `bootstrap_user` variable.
+- Run `stellar init --set stage0_phase=final` and then `stellar render`, so
+  the render removes the phase file.
+- Run the same `init`, `plan`, and `apply` commands again for the final
+  apply, which runs without the `bootstrap_user` variable.
 - That final apply manages the organization policies and imports the ones
   that the scan recorded, so you skip the `import.sh` script.
+- Keep the `stage0_phase` answer at `final` from then on, because a return
+  to `bootstrap` plans to delete the organization policies that Stage 0
+  manages.
 
 ### 2.4 Continue with Stage 1
 
@@ -194,8 +203,8 @@ each name.
 | `tenants` | The Stage 1 tenants, with each derived project ID and its remaining characters. |
 
 - The wizard never asks for the log sink type, the log retention, the
-  budget, the domain restricted sharing list, the billing override, or the
-  tenant locations.
+  budget, the domain restricted sharing list, the billing override, the
+  tenant locations, or the Stage 0 phase.
 - Set those values with the `--set` flag or edit the `answers.yaml` file.
 
 ### 4.2 Answers file
@@ -255,9 +264,9 @@ prompts only need Enter.
 
 - The `--answers-from` flag copies every answer from another environment
   prefix or an `answers.yaml` path, including the `overrides` answer.
-- The copy never includes the prefix, the engine path, the imports, or the
-  existing organization policies, because those belong to the source
-  environment.
+- The copy never includes the prefix, the engine path, the imports, the
+  existing organization policies, or the Stage 0 phase, because those
+  belong to the source environment.
 - The command lists the answers to review when the regime changes, such as
   an explicit `kms_protection_level` value.
 - The `--new-prefix` flag suggests a fresh prefix with a random suffix, so
@@ -425,8 +434,9 @@ already include.
 - A disabled API reports the exact `gcloud services enable` command to run.
 - Terraform can run as a service account, because Stage 0 only needs a user
   account for the `bootstrap_user` variable.
-- Pass that user's email with the `--bootstrap-user` flag, and use the same
-  value for `-var bootstrap_user` on the first Stage 0 apply.
+- Pass that user's email with the `--bootstrap-user` flag, and set the same
+  value as the `bootstrap_user` answer, which the render writes for the
+  first Stage 0 apply.
 - The `--redeploy` flag downgrades existing prefix resources to warnings when
   you rerun preflight against your own earlier deployment.
 - The deploying identity needs Billing Account Administrator on the billing
@@ -444,9 +454,13 @@ Terraform commands with the absolute workspace path, so you can copy them.
 ```text
 Next steps for 0-bootstrap:
   terraform -chdir=/path/to/home/envs/abc/fast/stages-aw/0-bootstrap init
-  terraform -chdir=/path/to/home/envs/abc/fast/stages-aw/0-bootstrap plan -var bootstrap_user=admin@example.com
+  terraform -chdir=/path/to/home/envs/abc/fast/stages-aw/0-bootstrap plan -out=s0.tfplan
+  terraform -chdir=/path/to/home/envs/abc/fast/stages-aw/0-bootstrap apply s0.tfplan
+After this first apply and the state migration, run stellar init --set stage0_phase=final and stellar render, then run the same commands for the final apply.
 ```
 
+- The sample shows the bootstrap phase, which is the default. In the
+  final phase the render prints only the three Terraform commands.
 - Each workspace links the stage files of the engine and keeps the files
   that the environment owns, such as `terraform.tfvars` and the local state.
 - The Stage 0 workspace receives a copy of the `providers.tf.tmp` file as
@@ -458,10 +472,38 @@ Next steps for 0-bootstrap:
 - The `--stage` flag renders one stage, such as `--stage 0`, and accepts
   repeats.
 - The `--diff` flag prints the changes and writes nothing.
-- The tfvars file never sets the `bootstrap_user` variable, because the DDG
-  passes it with the `-var` option on the first Stage 0 apply.
+- The tfvars file never sets the `bootstrap_user` variable, because the
+  `stage0_phase` answer decides whether Stage 0 runs with it.
 
-### 7.1 Manual edits
+### 7.1 Stage 0 phase
+
+The `stage0_phase` answer picks the mode of the next Stage 0 apply, so a
+plain `terraform apply` never runs in the wrong one.
+
+- The `bootstrap` phase is the default, and the render writes the
+  `0-bootstrap-phase.auto.tfvars` file with the `bootstrap_user` variable.
+- Terraform reads that file on every run, so the first apply grants the
+  bootstrap user and skips the organization policies without a `-var`
+  option.
+- The `bootstrap` phase requires the `bootstrap_user` answer, and the
+  `stellar init` command reports a missing one.
+- After the state migration, the `stellar init --set stage0_phase=final`
+  command and a render remove the file, so the final apply manages the
+  organization policies.
+- The render prints the next commands for the current phase, and the
+  `stellar env show` command prints the phase.
+- The render never replaces or removes a phase file that it did not write,
+  and stops instead.
+- The render warns when the `bootstrap` phase meets a workspace whose state
+  already moved to the remote backend, because the next apply is then the
+  final one.
+- The `--answers-from` flag never copies the phase, so a new environment
+  always starts in the `bootstrap` phase.
+- Keep a deployed Stage 0 in the `final` phase, because a return to
+  `bootstrap` plans to delete the organization policies that Stage 0
+  manages.
+
+### 7.2 Manual edits
 
 A render owns each tfvars file it writes, so put lasting changes in the
 `answers.yaml` file instead of the tfvars file.
@@ -599,10 +641,12 @@ The scan only reads from Google Cloud and saves its result to the
 The `stellar render` command adds one `import` block for these policies to
 the `0-bootstrap-imports.tf` file, and Stage 0 decides when it applies.
 
-- The first Stage 0 apply passes the `bootstrap_user` variable, so Stage 0
-  manages no organization policies yet and imports none.
-- The final Stage 0 apply omits the `bootstrap_user` variable and imports
-  each listed policy that the regime templates still set.
+- The first Stage 0 apply runs in the `bootstrap` phase with the
+  `bootstrap_user` variable, so Stage 0 manages no organization policies
+  yet and imports none.
+- The final Stage 0 apply runs in the `final` phase without the
+  `bootstrap_user` variable and imports each listed policy that the regime
+  templates still set.
 - Terraform skips an import once the state holds the policy, so later
   applies keep working with the same file.
 

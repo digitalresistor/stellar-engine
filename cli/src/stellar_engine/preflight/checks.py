@@ -343,8 +343,8 @@ def _bootstrap_user_result(ctx):
         return CheckResult(
             status=Status.PASS,
             detail=(
-                f"Pass `-var bootstrap_user={user}` on the first Stage 0 "
-                f"apply.{runs_as}"
+                f"The first Stage 0 apply grants {user} as `bootstrap_user`."
+                f"{runs_as}"
             ),
             **common,
         )
@@ -356,9 +356,9 @@ def _bootstrap_user_result(ctx):
                 "and Stage 0 needs a user account as `bootstrap_user`."
             ),
             remedy=(
-                "Pass --bootstrap-user with a user account email, and use "
-                "the same value for `-var bootstrap_user` on the first "
-                "Stage 0 apply."
+                "Pass --bootstrap-user with a user account email, and set "
+                "the same value as the `bootstrap_user` answer, which "
+                "stellar render writes for the first Stage 0 apply."
             ),
             **common,
         )

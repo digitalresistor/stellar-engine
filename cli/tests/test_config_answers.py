@@ -461,7 +461,9 @@ def test_to_preflight_reports_a_budget():
 
 
 def test_to_preflight_fits_preflight_inputs():
-    values = answers_lib.to_preflight(helpers.minimal_answers())
+    values = answers_lib.to_preflight(
+        helpers.minimal_answers(bootstrap_user=None, stage0_phase="final")
+    )
     assert "bootstrap_user" not in values
     known = set(inputs_lib.PreflightInputs.model_fields)
     assert set(values) <= known

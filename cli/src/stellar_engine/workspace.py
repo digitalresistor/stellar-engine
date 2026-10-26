@@ -16,9 +16,10 @@
 
 A workspace mirrors `fast/stages-aw/<stage>/` of the engine with absolute
 symlinks, so the engine code stays shared while each environment keeps its
-own real files: tfvars, provider files, import blocks, `.terraform/` and the
-local Stage 0 state. Stage code reaches modules as `../../../modules`, which
-resolves to the environment's `modules` symlink.
+own real files: tfvars, provider files, import blocks, the Stage 0 phase
+file, `.terraform/` and the local Stage 0 state. Stage code reaches modules
+as `../../../modules`, which resolves to the environment's `modules`
+symlink.
 
 Sync never overwrites or deletes a real file, because every real file in a
 workspace belongs to the environment.

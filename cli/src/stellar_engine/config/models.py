@@ -40,6 +40,11 @@ TENANT_KEY_PATTERN = r"^[a-z][a-z0-9-]*$"
 ENV_KEY_PATTERN = r"^[A-Za-z][A-Za-z0-9-]*$"
 # An organization policy constraint such as `iam.allowedPolicyMemberDomains`.
 CONSTRAINT_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$"
+# The Stage 0 phases: the first apply, then every apply after the state
+# migration. See `render.phase`.
+STAGE0_BOOTSTRAP = "bootstrap"
+STAGE0_FINAL = "final"
+Stage0Phase = Literal["bootstrap", "final"]
 
 _NonEmpty = Annotated[str, pydantic.Field(min_length=1)]
 _Constraint = Annotated[str, pydantic.Field(pattern=CONSTRAINT_PATTERN)]
@@ -229,6 +234,9 @@ class Answers(_Model):
         existing_org_policies: Constraints whose organization policies
             exist before Stage 0 and that Stage 0 declares, which the final
             Stage 0 apply imports. `stellar imports scan` fills it.
+        stage0_phase: Which Stage 0 apply comes next. The bootstrap phase
+            sets `bootstrap_user` through a generated file; the final phase,
+            after the state migration, leaves it unset.
     """
 
     schema_version: Literal[1] = 1
@@ -243,6 +251,15 @@ class Answers(_Model):
     bootstrap_project: str = pydantic.Field(pattern=patterns.PROJECT_ID)
     bootstrap_user: str | None = pydantic.Field(
         default=None, pattern=EMAIL_PATTERN
+    )
+    stage0_phase: Stage0Phase = pydantic.Field(
+        default=STAGE0_BOOTSTRAP,
+        description=(
+            "The next Stage 0 apply. bootstrap sets bootstrap_user for the "
+            "first apply; final leaves it unset after the state migration, "
+            "so Stage 0 manages the organization policies. Never return to "
+            "bootstrap after a final apply."
+        ),
     )
     region: str = pydantic.Field(min_length=1)
     compliance: Compliance

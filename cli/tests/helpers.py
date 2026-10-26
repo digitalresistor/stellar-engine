@@ -90,6 +90,8 @@ def minimal_data(**overrides):
         "region": "us-east4",
         "compliance": {"regime": "IL5"},
         "alert_email": f"alerts@{conftest.DOMAIN}",
+        # The default bootstrap phase requires the bootstrap user.
+        "bootstrap_user": f"admin@{conftest.DOMAIN}",
     }
     data.update(overrides)
     return data
@@ -124,10 +126,11 @@ def render(repo, name, stage, **updates):
     return stages.build(stage, answers, repo, env_paths(answers))
 
 
-def terraform(directory, *args, env=None):
+def terraform(directory, *args, env=None, stdin=None):
     """Runs terraform in a directory and returns the completed process."""
     return subprocess.run(
         ["terraform", f"-chdir={directory}", *args, "-no-color"],
+        input=stdin,
         capture_output=True,
         check=False,
         env=env,
