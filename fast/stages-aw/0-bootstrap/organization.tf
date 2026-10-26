@@ -190,7 +190,9 @@ module "organization-logging" {
   # log buckets (_Default, _Required) are created in the location
   # specified by local.locations.logging. This separate
   # organization-block prevents circular dependencies with later
-  # project creation.
+  # project creation. The Stage 0 folders inherit these settings, so they
+  # set none of their own: under Assured Workloads regimes that enforce
+  # CMEK for Logging, folder settings without a KMS key fail.
   source          = "../../../modules/organization"
   organization_id = "organizations/${var.organization.id}"
   logging_settings = {
@@ -227,9 +229,6 @@ module "no-compliance-folder" {
   parent     = module.organization-logging.id
   name       = "StellarEngine-${var.prefix}"
   depends_on = [module.organization-logging]
-  logging_settings = {
-    storage_location = local.locations.logging
-  }
 }
 
 locals {
@@ -249,9 +248,6 @@ module "branch-common-services-folder" {
   parent     = local.assured_workload_folder
   name       = "${lookup(var.regime_mapping, var.assured_workloads.regime, var.assured_workloads.regime)} Common Services"
   depends_on = [module.organization-logging]
-  logging_settings = {
-    storage_location = local.locations.logging
-  }
 }
 
 

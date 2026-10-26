@@ -116,6 +116,32 @@ class TestBootstrapLoggingOrder(unittest.TestCase):
             main_tf,
         )
 
+    def test_only_the_organization_sets_logging_settings(self):
+        # Folders inherit the organization settings. Folder settings without
+        # a KMS key fail under regimes that enforce CMEK for Logging.
+        org_tf = (_BOOTSTRAP_DIR / "organization.tf").read_text(
+            encoding="utf-8"
+        )
+        blocks = {
+            header: re.search(re.escape(header) + r"\s*\{[\s\S]*?\n\}", org_tf)
+            for header in (
+                'module "organization-logging"',
+                'module "no-compliance-folder"',
+                'module "branch-common-services-folder"',
+            )
+        }
+        for header, match in blocks.items():
+            self.assertIsNotNone(match, f"Block not found: {header}")
+        self.assertIn(
+            "logging_settings", blocks['module "organization-logging"'].group(0)
+        )
+        for header in (
+            'module "no-compliance-folder"',
+            'module "branch-common-services-folder"',
+        ):
+            with self.subTest(block=header):
+                self.assertNotIn("logging_settings", blocks[header].group(0))
+
     def test_automation_project_protects_bootstrap_service_accounts(self):
         automation_tf = (_BOOTSTRAP_DIR / "automation.tf").read_text(
             encoding="utf-8"
