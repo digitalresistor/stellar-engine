@@ -180,12 +180,11 @@ variable "region" {
   type        = string
 }
 
-# tflint-ignore: terraform_unused_declarations
-
 variable "remove_default_node_pool" {
-  description = "The Default NodePool remove it or not."
+  description = "Remove the default node pool, which runs without the hardened node settings of the cluster node pool."
   type        = bool
-  # default     = false
+  default     = true
+  nullable    = false
 }
 
 variable "snapshot_max_retention_days" {

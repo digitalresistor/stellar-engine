@@ -147,9 +147,8 @@ module "cluster" {
     }
   }
   default_nodepool = {
-    initial_node_count       = var.gke_initial_node_per_zone
-    remove_pool              = false
-    remove_default_node_pool = true
+    initial_node_count = var.gke_initial_node_per_zone
+    remove_pool        = var.remove_default_node_pool
   }
   node_config = {
     boot_disk_kms_key = module.kms.keys.default.id
