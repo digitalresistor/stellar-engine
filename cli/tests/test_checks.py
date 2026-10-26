@@ -345,14 +345,13 @@ NO_IAM_IMPORTS = (
 
 
 @pytest.fixture
-def importable_workload(repo, monkeypatch):
-    """Models Stage 0 code that ignores the workload input-only arguments.
+def replacing_workload(repo, monkeypatch):
+    """Models older Stage 0 code that does not ignore `resource_settings`.
 
-    The checked-in `organization.tf` does not ignore `resource_settings`, so
-    an import of a pre-created workload there plans a replacement.
+    An import of a pre-created workload there plans a replacement.
     """
     workload = dataclasses.replace(
-        repo.assured_workload(), replaced_on_import=()
+        repo.assured_workload(), replaced_on_import=("resource_settings",)
     )
     monkeypatch.setattr(
         repo_lib.Repo, "assured_workload", lambda self: workload
@@ -424,7 +423,6 @@ class TestPrecreate:
         assert conftest.LOG_EXPORT_ADDRESS in precreate.detail
         assert WORKLOAD in precreate.detail
 
-    @pytest.mark.usefixtures("importable_workload")
     def test_all_imported_passes_and_downgrades(self, make_ctx, cloud):
         cloud.billing_account = api.AccessDeniedError("denied")
         cloud.denied_billing_perms = LINK_DENIED
@@ -449,7 +447,6 @@ class TestPrecreate:
             "billing.precreate",
         ]
 
-    @pytest.mark.usefixtures("importable_workload")
     def test_closed_account_is_not_downgraded(self, make_ctx, cloud):
         cloud.billing_account = api.BillingAccount(conftest.BILLING, False)
         cloud.denied_billing_perms = LINK_DENIED
@@ -481,7 +478,6 @@ class TestPrecreate:
         assert "roles/billing.admin" in remedy(precreate)
         assert "billing.no_iam" not in remedy(precreate)
 
-    @pytest.mark.usefixtures("importable_workload")
     def test_no_admin_access_all_imported_passes(self, make_ctx, cloud):
         cloud.denied_billing_perms = {ADMIN_PERMISSION}
         imported = (*NO_IAM_IMPORTS, conftest.BILLING_EXPORT_ADDRESS)
@@ -505,9 +501,8 @@ class TestPrecreate:
         roles = by_id(checks.check_iam_roles(ctx))
         assert roles[f"iam.{checks.BILLING_ADMIN_ROLE}"].status == Status.FAIL
 
+    @pytest.mark.usefixtures("replacing_workload")
     def test_workload_import_that_replaces_fails(self, make_ctx, cloud):
-        # The checked-in organization.tf sets resource_settings without
-        # ignoring it, so the import plans a replacement.
         cloud.billing_account = api.AccessDeniedError("denied")
         cloud.denied_billing_perms = LINK_DENIED
         found = billing_results(
@@ -523,6 +518,7 @@ class TestPrecreate:
         assert found["billing.account"].status == Status.FAIL
         assert found["billing.link"].status == Status.FAIL
 
+    @pytest.mark.usefixtures("replacing_workload")
     def test_workload_hint_without_import(self, make_ctx, cloud):
         cloud.denied_billing_perms = LINK_DENIED
         precreate = billing_results(make_ctx, billing_no_iam=True)[
@@ -532,7 +528,6 @@ class TestPrecreate:
         assert "because the API requires one" in fix
         assert "helps only once organization.tf lists resource_settings" in fix
 
-    @pytest.mark.usefixtures("importable_workload")
     def test_budget_still_fails(self, make_ctx, cloud):
         # The budget lives on the billing account, so no pre-created
         # resource replaces the access it needs.
@@ -629,7 +624,6 @@ class TestPrecreate:
         assert precreate.status == Status.SKIP
         assert "--org" in precreate.detail
 
-    @pytest.mark.usefixtures("importable_workload")
     def test_tenant_projects_are_listed(self, make_ctx, cloud):
         cloud.denied_billing_perms = LINK_DENIED
         found = billing_results(

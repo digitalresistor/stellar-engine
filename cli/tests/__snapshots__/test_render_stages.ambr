@@ -580,6 +580,14 @@
     billing_project = "example-bootstrap"
   }
   
+  # Deletion policy of the Stage 0 projects that the imports adopt.
+  # stellar writes ABANDON while keep_imported_projects is true in
+  # answers.yaml, so terraform destroy keeps those projects.
+  project_deletion_policies = {
+    automation = "ABANDON"
+    logging    = "ABANDON"
+  }
+  
   # overrides.0-bootstrap in answers.yaml sets this value.
   iam = {
     "roles/resourcemanager.projectCreator" = ["domain:example.com"]

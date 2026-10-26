@@ -460,9 +460,9 @@ def test_assured_workload(repo):
     assert workload.skipped_regime == "COMPLIANCE_REGIME_UNSPECIFIED"
     assert workload.created("IL5")
     assert not workload.created("COMPLIANCE_REGIME_UNSPECIFIED")
-    # organization.tf ignores billing_account and leaves
-    # provisioned_resources_parent empty, but sets resource_settings.
-    assert workload.replaced_on_import == ("resource_settings",)
+    # organization.tf ignores billing_account and resource_settings and
+    # leaves provisioned_resources_parent empty.
+    assert workload.replaced_on_import == ()
 
 
 def _write_workload(tmp_path, lifecycle):
