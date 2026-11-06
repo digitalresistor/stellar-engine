@@ -26,6 +26,7 @@ from collections.abc import Callable
 import dataclasses
 
 from stellar_engine import org_policies
+from stellar_engine.config import answers as answers_lib
 from stellar_engine.deploy import cloud_ops
 from stellar_engine.deploy import model
 from stellar_engine.deploy import remedies
@@ -372,6 +373,15 @@ IAM_ROLES = model.Step(
     applies_when=common.first_apply_pending,
     when=_BEFORE_STAGE0,
 )
+
+
+def _manages_org_policies(ctx: model.Context) -> bool:
+    """Returns whether Stage 0 imports existing policies from answers.yaml."""
+    return answers_lib.stage0_org_resources(ctx.answers)[
+        "org_policies"
+    ] and not answers_lib.stage0_import_defaults(ctx.answers)
+
+
 ORG_POLICIES = model.Step(
     id="pre.org_policies",
     stage=STAGE,
@@ -387,6 +397,8 @@ ORG_POLICIES = model.Step(
     ),
     check=_check_org_policies,
     run=_run_org_policies,
+    applies_when=_manages_org_policies,
+    when="Stage 0 manages organization policies without import_defaults",
 )
 PREFLIGHT = model.Step(
     id="pre.preflight",

@@ -285,6 +285,17 @@ _gcs_agent = _agent_action(
 )
 
 
+def _error_blocks(output: str) -> list[str]:
+    """Splits Terraform output into individual `Error:` diagnostic blocks."""
+    starts = [match.start() for match in _ERROR_START_RE.finditer(output)]
+    if not starts:
+        return [output]
+    return [
+        output[start:end]
+        for start, end in zip(starts, [*starts[1:], len(output)], strict=True)
+    ]
+
+
 def disabled_api(output: str) -> tuple[str, str] | None:
     """Returns the disabled service and its project named in an error.
 
@@ -294,12 +305,15 @@ def disabled_api(output: str) -> tuple[str, str] | None:
     Returns:
         The service and the consumer project, or None.
     """
-    consumer = _CONSUMER_RE.search(output)
-    service = _SERVICE_RE.search(output)
-    if consumer and service:
-        return service.group(1), consumer.group(1)
-    link = _CONSOLE_LINK_RE.search(output)
-    return (link.group(1), link.group(2)) if link else None
+    for block in _error_blocks(output):
+        consumer = _CONSUMER_RE.search(block)
+        service = _SERVICE_RE.search(block)
+        if consumer and service:
+            return service.group(1), consumer.group(1)
+        link = _CONSOLE_LINK_RE.search(block)
+        if link:
+            return link.group(1), link.group(2)
+    return None
 
 
 def _disabled_cause(failure: Failure) -> str | None:
@@ -311,13 +325,30 @@ def _disabled_cause(failure: Failure) -> str | None:
 def _deployment_project(ctx: model.Context, project: str) -> bool:
     """Returns whether a project ID belongs to this deployment.
 
-    Every project the stages create starts with the prefix, and the
-    bootstrap project hosts the first applies.
+    Only the bootstrap project, Stage 0 projects, Stage 1 tenant projects,
+    and explicitly imported `google_project` targets count as routine under
+    `--yes`; unrelated projects that happen to share `<prefix>-` still ask.
     """
     answers = ctx.answers
-    return project == answers.bootstrap_project or project.startswith(
-        f"{answers.prefix}-"
-    )
+    known = {
+        answers.bootstrap_project,
+        *(
+            derive.stage0_project_id(answers, item)
+            for item in ctx.repo.stage0_projects()
+        ),
+        *(
+            project_id
+            for project_ids in derive.tenant_project_ids(answers).values()
+            for project_id in project_ids
+        ),
+        *(
+            import_id
+            for stage_imports in answers.imports.values()
+            for address, import_id in stage_imports.items()
+            if address.endswith(naming.PROJECT_ADDRESS_SUFFIX)
+        ),
+    }
+    return project in known
 
 
 def _enable_api(ctx: model.Context, failure: Failure) -> bool:

@@ -261,8 +261,11 @@ def _typed_decision(
     decision = (
         run_state_lib.CONFIRMED if choice == _CONFIRM else run_state_lib.SKIPPED
     )
+    overwrites = sum(
+        1 for item in diff.audit_overwrites if item.live is not None
+    )
     detail = (
-        f"{len(diff.removed)} removed, {len(diff.audit_overwrites)} audit "
+        f"{len(diff.removed)} removed, {overwrites} audit "
         f"configs, {len(diff.conditional_replacements)} conditional "
         f"bindings, {len(owners)} imported project owners; snapshot "
         f"{snapshot}"

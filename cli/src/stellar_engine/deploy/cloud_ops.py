@@ -138,10 +138,15 @@ def missing_roles(
         roles: The roles the member needs.
         grantee: The member, such as `user:admin@example.com`.
     """
+    wanted = iam_diff.member_key(grantee)
     return [
         role
         for role in roles
-        if grantee not in policy.bindings.get(iam_diff.BindingKey(role), ())
+        if wanted
+        not in {
+            iam_diff.member_key(existing)
+            for existing in policy.bindings.get(iam_diff.BindingKey(role), ())
+        }
     ]
 
 

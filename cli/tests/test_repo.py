@@ -33,6 +33,7 @@ from stellar_engine import repo as repo_lib
 from stellar_engine.preflight import checks
 from stellar_engine.preflight import regions
 from stellar_engine.render import hcl
+from stellar_engine.terraform import guards
 
 _DDG_ROLE_RE = re.compile(r"\((roles/[a-zA-Z.]+)\)")
 
@@ -806,3 +807,19 @@ def test_hcl_helpers_cover_every_stage0_block(repo):
         for name, _ in repo_lib._resources(path, kind)
     )
     assert resources == expected
+
+
+def test_organization_logging_address_matches_targeted_guard(repo):
+    modules = dict(repo_lib._modules(repo.bootstrap_dir / "organization.tf"))
+    mod_body = modules["organization-logging"]
+    mod_index = "[0]" if "count" in mod_body else ""
+    ((res_name, res_body),) = repo_lib._resources(
+        repo.root / "modules/organization/logging.tf",
+        "google_logging_organization_settings",
+    )
+    res_index = "[0]" if "count" in res_body else ""
+    planned = (
+        f"module.organization-logging{mod_index}."
+        f"google_logging_organization_settings.{res_name}{res_index}"
+    )
+    assert planned in guards.ORG_LOGGING_SETTINGS

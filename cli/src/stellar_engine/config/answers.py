@@ -55,6 +55,16 @@ _TENANT_KEY = "TENANT_NAME"
 
 # Stage 0 overrides that keep or add grants on authoritative roles.
 _STAGE0_IAM_OVERRIDES = ("iam", "iam_by_principals")
+# Keys of `0-bootstrap` `var.deploy_org_resources`, which all default to true.
+_STAGE0_ORG_RESOURCES = (
+    "audit_config",
+    "custom_roles",
+    "iam",
+    "logging_settings",
+    "logging_sinks",
+    "org_policies",
+    "workforce_identity_pool",
+)
 
 
 # Slots of a ruamel map entry comment: the comment lines before the key,
@@ -62,6 +72,7 @@ _STAGE0_IAM_OVERRIDES = ("iam", "iam_by_principals")
 # above the next key.
 _BEFORE = 1
 _TRAILING = 2
+_SEQ_TRAILING = 0
 
 
 class AnswersError(Exception):
@@ -198,16 +209,26 @@ def load(path: pathlib.Path) -> models.Answers:
 
 
 def _trailing_owner(mapping, key):
-    """Returns the map and key whose comment token ends the entry of `key`.
+    """Returns the container, key and slot holding trailing lines of `key`.
 
     ruamel stores the comment lines above a key as the trailing token of
-    the entry before it, and a nested map's entry ends with its last key.
+    the entry before it: slot 2 of a map's last entry, or slot 0 of a
+    sequence's last item.
     """
     value = mapping[key]
-    while isinstance(value, yaml.CommentedMap) and value:
-        mapping, key = value, list(value)[-1]
-        value = mapping[key]
-    return mapping, key
+    while True:
+        if isinstance(value, yaml.CommentedMap) and value:
+            mapping, key = value, list(value)[-1]
+            value = mapping[key]
+        elif isinstance(value, yaml.CommentedSeq) and value:
+            mapping, key = value, len(value) - 1
+            value = mapping[key]
+        else:
+            break
+    slot = (
+        _SEQ_TRAILING if isinstance(mapping, yaml.CommentedSeq) else _TRAILING
+    )
+    return mapping, key, slot
 
 
 def _pop_following(mapping, key):
@@ -216,9 +237,9 @@ def _pop_following(mapping, key):
     Returns:
         The lines, without the EOL comment of the entry, which stays.
     """
-    owner, owner_key = _trailing_owner(mapping, key)
+    owner, owner_key, slot = _trailing_owner(mapping, key)
     entry = owner.ca.items.get(owner_key)
-    token = entry[_TRAILING] if entry else None
+    token = entry[slot] if entry else None
     if token is None:
         return ""
     # The token holds the EOL comment of the line, then the lines below it.
@@ -226,7 +247,7 @@ def _pop_following(mapping, key):
     if eol.strip():
         token.value = eol + "\n"
     else:
-        entry[_TRAILING] = None
+        entry[slot] = None
     return lines
 
 
@@ -240,12 +261,12 @@ def _put_above(mapping, key, text):
 
 
 def _put_after(mapping, key, text):
-    owner, owner_key = _trailing_owner(mapping, key)
+    owner, owner_key, slot = _trailing_owner(mapping, key)
     entry = owner.ca.items.setdefault(owner_key, [None] * 4)
-    if entry[_TRAILING] is None:
-        entry[_TRAILING] = _comment_token("\n" + text)
+    if entry[slot] is None:
+        entry[slot] = _comment_token("\n" + text)
     else:
-        entry[_TRAILING].value += text
+        entry[slot].value += text
 
 
 def _merge(previous, data):
@@ -286,13 +307,27 @@ def _merge(previous, data):
     return previous
 
 
+def _as_node(value):
+    return yaml.CommentedSeq(value) if isinstance(value, list) else value
+
+
 def _update(previous, data):
+    is_map = isinstance(previous, yaml.CommentedMap)
     for key, value in data.items():
         old = previous.get(key)
         if isinstance(value, dict) and isinstance(old, dict):
             _merge(old, value)
         elif key not in previous or plain(old) != value:
-            previous[key] = value
+            lines = (
+                _pop_following(previous, key)
+                if is_map
+                and key in previous
+                and isinstance(old, (yaml.CommentedMap, yaml.CommentedSeq))
+                else ""
+            )
+            previous[key] = _as_node(value)
+            if lines.strip():
+                _put_after(previous, key, lines)
     return previous
 
 
@@ -382,8 +417,7 @@ def update(
 
     The change edits plain data, so it never sees ruamel nodes; `save`
     then merges the result into the loaded map. A list that the change
-    alters is written anew, so it loses the comments inside it and the
-    comment lines below its last item, which ruamel keeps with that item.
+    alters is written anew, so it loses the comments inside it.
 
     Args:
         path: The `answers.yaml` path.
@@ -630,6 +664,36 @@ def stage0_iam_overrides(
     return found
 
 
+def stage0_org_resources(answers: models.Answers) -> dict[str, bool]:
+    """Returns the effective `deploy_org_resources` flags of Stage 0.
+
+    Every flag defaults to True, matching `0-bootstrap/variables.tf`.
+    Non-boolean entries stay out rather than failing preflight.
+
+    Args:
+        answers: The environment answers.
+
+    Returns:
+        Each `deploy_org_resources` key to its effective boolean.
+    """
+    found: dict[str, bool] = dict.fromkeys(_STAGE0_ORG_RESOURCES, True)
+    raw = answers.overrides.get(paths.BOOTSTRAP, {}).get("deploy_org_resources")
+    if isinstance(raw, dict):
+        for key in _STAGE0_ORG_RESOURCES:
+            value = raw.get(key)
+            if isinstance(value, bool):
+                found[key] = value
+    return found
+
+
+def stage0_import_defaults(answers: models.Answers) -> bool:
+    """Returns whether `org_policies_config.import_defaults` is true."""
+    config = answers.overrides.get(paths.BOOTSTRAP, {}).get(
+        "org_policies_config"
+    )
+    return isinstance(config, dict) and config.get("import_defaults") is True
+
+
 def to_preflight(answers: models.Answers) -> dict:
     """Returns the PreflightInputs field values the answers define.
 
@@ -669,6 +733,7 @@ def to_preflight(answers: models.Answers) -> dict:
         "domain": answers.organization.domain,
         "customer_id": answers.organization.customer_id,
         "bootstrap_user": answers.bootstrap_user,
+        "stage0_phase": answers.stage0_phase,
         "groups": dict(answers.groups),
         "tenant_project_ids": tuple(tenant_ids),
         "imported_project_ids": tuple(imported),
@@ -681,5 +746,7 @@ def to_preflight(answers: models.Answers) -> dict:
         "billing_budget": answers.budget.amount is not None,
         "existing_org_policies": tuple(answers.existing_org_policies),
         "stage0_iam_overrides": stage0_iam_overrides(answers),
+        "stage0_org_resources": stage0_org_resources(answers),
+        "stage0_import_defaults": stage0_import_defaults(answers),
     }
     return {key: value for key, value in values.items() if value is not None}

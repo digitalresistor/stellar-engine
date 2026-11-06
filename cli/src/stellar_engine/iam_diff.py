@@ -43,6 +43,7 @@ from stellar_engine.terraform import plan as plan_lib
 BINDING_TYPE = "google_organization_iam_binding"
 AUDIT_CONFIG_TYPE = "google_organization_iam_audit_config"
 MEMBER_TYPE = "google_organization_iam_member"
+POLICY_TYPE = "google_organization_iam_policy"
 # A principal that IAM deleted keeps its grants under this prefix until
 # the binding changes; nothing can grant it again, so diffs ignore it.
 _DELETED = "deleted:"
@@ -52,6 +53,10 @@ _UNCHANGED_ACTIONS = ("no-op", "read", "forget")
 _BINDING_FIELDS = ("members", "role", "condition")
 _MEMBER_FIELDS = ("member", "role", "condition")
 _AUDIT_FIELDS = ("service", "audit_log_config")
+_POLICY_FIELDS = ("policy_data",)
+_ORG_ADDITIVE_PREFIX = (
+    "module.organization.google_organization_iam_member.bindings["
+)
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SNAPSHOT_SUFFIX = ".json"
 _META_SUFFIX = ".meta.json"
@@ -263,6 +268,9 @@ class Target:
             one removes the member from the live binding, even when someone
             granted it outside Terraform too.
         added_members: Additive grants that the apply creates.
+        authoritative_policy: Whether a `google_organization_iam_policy`
+            replaces the entire organization policy, deleting every binding
+            and audit config it omits.
     """
 
     bindings: Mapping[BindingKey, frozenset[str] | None] = dataclasses.field(
@@ -273,6 +281,7 @@ class Target:
     )
     removed_members: frozenset[Grant] = frozenset()
     added_members: frozenset[Grant] = frozenset()
+    authoritative_policy: bool = False
 
     @property
     def empty(self) -> bool:
@@ -282,7 +291,20 @@ class Target:
             or self.audit_configs
             or self.removed_members
             or self.added_members
+            or self.authoritative_policy
         )
+
+
+def member_key(member: str) -> str:
+    """Returns the comparison key of an IAM member string.
+
+    Email and domain principals compare without case in Google Cloud IAM,
+    whereas URI-formatted federated principals (`principal://` and
+    `principalSet://`) carry case-sensitive subjects and attributes.
+    """
+    if "://" in member:
+        return member
+    return member.casefold()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -294,11 +316,17 @@ class Grant:
         member: Principal, such as `user:admin@example.com`.
         additive: Whether an additive `google_organization_iam_member`
             grants it, rather than an authoritative binding.
+        override_key: The `iam_bindings_additive` key in Stage 0 when a
+            plan deletes a `module.organization` additive binding.
+        config_member: The member spelling in Terraform state before a
+            plan deletes an additive binding.
     """
 
     key: BindingKey
     member: str
     additive: bool = False
+    override_key: str | None = dataclasses.field(default=None, compare=False)
+    config_member: str | None = dataclasses.field(default=None, compare=False)
 
     def sort_key(self) -> tuple[str, str, str]:
         """Returns a key that orders grants by binding, then member."""
@@ -316,16 +344,16 @@ class Grant:
 
 @dataclasses.dataclass(frozen=True)
 class AuditOverwrite:
-    """An existing audit config that the apply replaces or deletes.
+    """An audit config that an apply or restore adds, replaces or deletes.
 
     Attributes:
         service: Service, such as `allServices`.
-        live: The configs the organization has now.
+        live: The configs the organization has now, or None when absent.
         target: The configs after the apply; None when it deletes them.
     """
 
     service: str
-    live: AuditConfigs
+    live: AuditConfigs | None
     target: AuditConfigs | None
 
 
@@ -341,7 +369,8 @@ class Diff:
         added: Grants the apply makes that the policy lacks.
         kept_foreign: Live grants on managed bindings that the apply keeps,
             such as grants that `overrides.0-bootstrap.iam` lists.
-        audit_overwrites: Live audit configs that the apply changes.
+        audit_overwrites: Audit configs that the apply adds, replaces or
+            deletes.
         conditional_replacements: Live conditional bindings whose members
             the apply rewrites.
     """
@@ -357,7 +386,7 @@ class Diff:
         """Returns whether the apply takes away access or audit logging."""
         return bool(
             self.removed
-            or self.audit_overwrites
+            or any(item.live is not None for item in self.audit_overwrites)
             or self.conditional_replacements
         )
 
@@ -540,11 +569,52 @@ def _plan_configs(values):
     )
 
 
-def _plan_change(change: plan_lib.Change, bindings, audit_configs, members):
+def _additive_override_key(change: plan_lib.Change) -> str | None:
+    """Returns the `iam_bindings_additive` key of a Stage 0 additive grant."""
+    if (
+        change.module_address == "module.organization"
+        and change.name == "bindings"
+        and isinstance(change.index, str)
+    ):
+        return change.index
+    if change.address.startswith(
+        _ORG_ADDITIVE_PREFIX
+    ) and change.address.endswith("]"):
+        raw = change.address[len(_ORG_ADDITIVE_PREFIX) : -1]
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, str) else None
+    return None
+
+
+def _plan_policy(
+    change: plan_lib.Change, unknown: Mapping[str, Any], bindings, audit_configs
+) -> bool:
+    """Adds what a `google_organization_iam_policy` change sets."""
+    if any(
+        plan_lib.has_unknown(unknown.get(field)) for field in _POLICY_FIELDS
+    ):
+        raise UnknownMembersError(change.address)
+    if change.after:
+        policy = Policy.from_json(
+            json.loads(_text(change.after, "policy_data"))
+        )
+        for key, policy_members in policy.bindings.items():
+            _put(bindings, key, policy_members)
+        for service, configs in policy.audit_configs.items():
+            audit_configs[service] = configs
+    return bool(change.after or change.deletes)
+
+
+def _plan_change(
+    change: plan_lib.Change, bindings, audit_configs, members
+) -> bool:
     """Adds what one IAM change sets to the target.
 
     `members` holds the removed and the added additive grants, in that
-    order.
+    order. Returns whether the change replaces the entire policy.
     """
     is_binding = change.type == BINDING_TYPE
     unknown = change.after_unknown
@@ -557,13 +627,24 @@ def _plan_change(change: plan_lib.Change, bindings, audit_configs, members):
         # as a removal.
         removed, added = members
         if change.deletes and before:
-            removed.add(Grant(_plan_key(before), _text(before, "member"), True))
+            raw_member = _text(before, "member")
+            removed.add(
+                Grant(
+                    _plan_key(before),
+                    raw_member,
+                    True,
+                    override_key=_additive_override_key(change),
+                    config_member=raw_member,
+                )
+            )
         known = not any(
             plan_lib.has_unknown(unknown.get(field)) for field in _MEMBER_FIELDS
         )
         if after and known:
             added.add(Grant(_plan_key(after), _text(after, "member"), True))
-        return
+        return False
+    if change.type == POLICY_TYPE:
+        return _plan_policy(change, unknown, bindings, audit_configs)
     fields = _BINDING_FIELDS if is_binding else _AUDIT_FIELDS
     if any(plan_lib.has_unknown(unknown.get(field)) for field in fields):
         raise UnknownMembersError(change.address)
@@ -573,11 +654,12 @@ def _plan_change(change: plan_lib.Change, bindings, audit_configs, members):
         if after:
             members = frozenset(after.get("members") or ())
             _put(bindings, _plan_key(after), members)
-        return
+        return False
     if change.deletes and before:
         _put(audit_configs, _text(before, "service"), None)
     if after:
         audit_configs[_text(after, "service")] = _plan_configs(after)
+    return False
 
 
 def _iam_changes(plan: plan_lib.Plan) -> list[plan_lib.Change]:
@@ -586,7 +668,8 @@ def _iam_changes(plan: plan_lib.Plan) -> list[plan_lib.Change]:
         change
         for change in plan.changes
         if change.managed
-        and change.type in (BINDING_TYPE, MEMBER_TYPE, AUDIT_CONFIG_TYPE)
+        and change.type
+        in (BINDING_TYPE, MEMBER_TYPE, AUDIT_CONFIG_TYPE, POLICY_TYPE)
     ]
 
 
@@ -603,8 +686,9 @@ def manages_iam(plan: plan_lib.Plan) -> bool:
     Returns:
         True when the plan holds any managed
         `google_organization_iam_binding`,
-        `google_organization_iam_member` or
-        `google_organization_iam_audit_config`, changed or not.
+        `google_organization_iam_member`,
+        `google_organization_iam_audit_config` or
+        `google_organization_iam_policy`, changed or not.
     """
     return bool(_iam_changes(plan))
 
@@ -614,11 +698,12 @@ def target_from_plan(plan: plan_lib.Plan) -> Target:
 
     It reads every managed `google_organization_iam_binding`, whether the
     module names it `authoritative` or `bindings`, every additive
-    `google_organization_iam_member`, and every
-    `google_organization_iam_audit_config`. Deleting an additive member
-    removes the member from the live binding, whoever granted it, so the
-    target records those deletes. Changes that leave the live policy alone
-    stay out.
+    `google_organization_iam_member`, every
+    `google_organization_iam_audit_config`, and any
+    `google_organization_iam_policy`. Deleting an additive member removes
+    the member from the live binding, whoever granted it, so the target
+    records those deletes. Changes that leave the live policy alone stay
+    out.
 
     Args:
         plan: The parsed saved plan.
@@ -630,18 +715,30 @@ def target_from_plan(plan: plan_lib.Plan) -> Target:
 
     Raises:
         UnknownMembersError: If a binding's members, role or condition, an
-            additive member, or an audit config is unknown until apply,
-            because then the removed grants cannot be listed.
-        ValueError: If a change has a malformed role or condition.
+            audit config, or a policy's data is unknown until apply,
+            because then the removed grants cannot be listed. Created
+            additive members with unknown values are ignored because they
+            cannot remove live grants.
+        ValueError: If a change has a malformed role, condition or policy.
     """
     bindings: dict[BindingKey, frozenset[str] | None] = {}
     audit_configs: dict[str, AuditConfigs | None] = {}
     removed: set[Grant] = set()
     added: set[Grant] = set()
+    authoritative_policy = False
     for change in _iam_changes(plan):
         if change.action not in _UNCHANGED_ACTIONS:
-            _plan_change(change, bindings, audit_configs, (removed, added))
-    return Target(bindings, audit_configs, frozenset(removed), frozenset(added))
+            authoritative_policy = (
+                _plan_change(change, bindings, audit_configs, (removed, added))
+                or authoritative_policy
+            )
+    return Target(
+        bindings,
+        audit_configs,
+        frozenset(removed),
+        frozenset(added),
+        authoritative_policy=authoritative_policy,
+    )
 
 
 def stage0_audit_configs(repo: repo_lib.Repo) -> dict[str, AuditConfigs]:
@@ -660,6 +757,11 @@ def stage0_audit_configs(repo: repo_lib.Repo) -> dict[str, AuditConfigs]:
         )
         for service, configs in repo.audit_log_configs().items()
     }
+
+
+_OPTIONAL_HOLDERS = frozenset(
+    {repo_lib.HolderKind.DOMAIN, repo_lib.HolderKind.BOOTSTRAP_USER}
+)
 
 
 def target_from_repo(
@@ -691,8 +793,14 @@ def target_from_repo(
     """
     bindings: dict[BindingKey, set[str]] = {}
     for role, holders in repo.authoritative_bindings().items():
-        members = bindings.setdefault(BindingKey(role), set())
-        members.update(m for m in map(resolve, holders) if m is not None)
+        resolved = {m for m in map(resolve, holders) if m is not None}
+        if (
+            holders
+            and not resolved
+            and all(holder.kind in _OPTIONAL_HOLDERS for holder in holders)
+        ):
+            continue
+        bindings.setdefault(BindingKey(role), set()).update(resolved)
     for role, members in (stage0_overrides.get("iam") or {}).items():
         bindings.setdefault(BindingKey(role), set()).update(members)
     by_principals = stage0_overrides.get("iam_by_principals") or {}
@@ -736,8 +844,8 @@ def keep_in_overrides(data: dict[str, Any], grants: Iterable[Grant]) -> None:
     it; adding the member to the authoritative binding instead would drop
     every other member of that role. New entries are appended, which
     keeps the comments of the answers file; a role whose member list
-    grows loses the comments inside that list. Members compare without
-    case, as the provider compares them.
+    grows loses the comments inside that list. Email and domain members
+    compare without case, while federated principal URIs preserve case.
 
     Args:
         data: Answer data, as `config.answers.update` passes it to its
@@ -752,10 +860,23 @@ def keep_in_overrides(data: dict[str, Any], grants: Iterable[Grant]) -> None:
     for grant in grants:
         if grant.additive:
             additive = _mapping(stage0, "iam_bindings_additive")
-            additive.setdefault(
-                additive_key(grant),
-                {"member": grant.member, "role": grant.key.role},
-            )
+            member = grant.config_member or grant.member
+            if grant.override_key is not None:
+                additive.setdefault(
+                    grant.override_key,
+                    {"member": member, "role": grant.key.role},
+                )
+            elif not any(
+                isinstance(entry, Mapping)
+                and entry.get("role") == grant.key.role
+                and member_key(str(entry.get("member", "")))
+                == member_key(member)
+                for entry in additive.values()
+            ):
+                additive.setdefault(
+                    additive_key(grant),
+                    {"member": member, "role": grant.key.role},
+                )
             continue
         iam = _mapping(stage0, "iam")
         members = iam.get(grant.key.role)
@@ -766,39 +887,44 @@ def keep_in_overrides(data: dict[str, Any], grants: Iterable[Grant]) -> None:
                 f"overrides.{paths.BOOTSTRAP}.iam.{grant.key.role} must be "
                 "a list of members."
             )
-        if grant.member.casefold() not in {
-            str(member).casefold() for member in members
+        if member_key(grant.member) not in {
+            member_key(str(member)) for member in members
         }:
             members.append(grant.member)
 
 
 def _live_members(members) -> dict[str, str]:
-    """Maps each member without case to its spelling, without deleted ones.
+    """Maps each member key to its spelling, without deleted principals.
 
-    The provider compares members without case, so `group:Admins@x` and
-    `group:admins@x` are one member to Terraform.
+    Email and domain members compare without case, whereas federated
+    `principal://` and `principalSet://` URIs compare with exact case.
     """
     return {
-        member.casefold(): member
+        member_key(member): member
         for member in sorted(members, reverse=True)
         if not member.startswith(_DELETED)
     }
 
 
-def _audit_overwrites(live, target):
-    return tuple(
-        AuditOverwrite(service, live.audit_configs[service], configs)
-        for service, configs in sorted(target.audit_configs.items())
-        if service in live.audit_configs
-        and live.audit_configs[service] != configs
-    )
+def _audit_overwrites(
+    live: Policy, audit_configs: Mapping[str, AuditConfigs | None]
+) -> tuple[AuditOverwrite, ...]:
+    found = []
+    for service, configs in sorted(audit_configs.items()):
+        current = live.audit_configs.get(service)
+        if current is None:
+            if configs:
+                found.append(AuditOverwrite(service, None, configs))
+        elif current != configs:
+            found.append(AuditOverwrite(service, current, configs))
+    return tuple(found)
 
 
 def diff(live: Policy, target: Target) -> Diff:
     """Compares the live policy with what an apply sets.
 
-    Only the bindings and audit configs the target manages change; the
-    apply leaves every other binding of the live policy alone.
+    Only the bindings and audit configs the target manages change, unless
+    `target.authoritative_policy` replaces the entire policy.
 
     Args:
         live: The live organization policy.
@@ -807,11 +933,21 @@ def diff(live: Policy, target: Target) -> Diff:
     Returns:
         The grants removed, added and kept, sorted by role, condition and
         member, and the audit configs and conditional bindings the apply
-        rewrites. Members compare without case and keep their live
-        spelling.
+        rewrites. Email and domain members compare without case and keep
+        their live spelling; federated principal URIs preserve case.
     """
+    binding_targets = (
+        {**dict.fromkeys(live.bindings, None), **target.bindings}
+        if target.authoritative_policy
+        else target.bindings
+    )
+    audit_targets = (
+        {**dict.fromkeys(live.audit_configs, None), **target.audit_configs}
+        if target.authoritative_policy
+        else target.audit_configs
+    )
     removed, added, kept, conditional = [], [], [], []
-    for key, members in target.bindings.items():
+    for key, members in binding_targets.items():
         current = _live_members(live.bindings.get(key, ()))
         wanted = _live_members(members or ())
         removed += [Grant(key, current[m]) for m in current.keys() - wanted]
@@ -823,13 +959,13 @@ def diff(live: Policy, target: Target) -> Diff:
             and current.keys() != wanted.keys()
         ):
             conditional.append(key)
-    removed += _removed_members(live, target)
+    removed += _removed_members(live, target, binding_targets)
     added += _added_members(live, target)
     return Diff(
         removed=tuple(sorted(removed, key=Grant.sort_key)),
         added=tuple(sorted(added, key=Grant.sort_key)),
         kept_foreign=tuple(sorted(kept, key=Grant.sort_key)),
-        audit_overwrites=_audit_overwrites(live, target),
+        audit_overwrites=_audit_overwrites(live, audit_targets),
         conditional_replacements=tuple(
             sorted(conditional, key=BindingKey.sort_key)
         ),
@@ -838,17 +974,21 @@ def diff(live: Policy, target: Target) -> Diff:
 
 def _kept_by_target(target: Target, grant: Grant) -> bool:
     """Returns whether the apply still grants the member of a grant."""
-    member = grant.member.casefold()
+    member = member_key(grant.member)
     recreated = {
-        (other.key, other.member.casefold()) for other in target.added_members
+        (other.key, member_key(other.member)) for other in target.added_members
     }
     wanted = target.bindings.get(grant.key) or ()
     return (grant.key, member) in recreated or member in {
-        other.casefold() for other in wanted
+        member_key(other) for other in wanted
     }
 
 
-def _removed_members(live: Policy, target: Target) -> list[Grant]:
+def _removed_members(
+    live: Policy,
+    target: Target,
+    binding_targets: Mapping[BindingKey, frozenset[str] | None],
+) -> list[Grant]:
     """Returns the live additive grants that the apply deletes.
 
     A delete that the same apply creates again, as in a replace that
@@ -858,12 +998,20 @@ def _removed_members(live: Policy, target: Target) -> list[Grant]:
     """
     found = []
     for grant in target.removed_members:
-        if grant.key in target.bindings or _kept_by_target(target, grant):
+        if grant.key in binding_targets or _kept_by_target(target, grant):
             continue
         current = _live_members(live.bindings.get(grant.key, ()))
-        spelling = current.get(grant.member.casefold())
+        spelling = current.get(member_key(grant.member))
         if spelling is not None:
-            found.append(Grant(grant.key, spelling, additive=True))
+            found.append(
+                Grant(
+                    grant.key,
+                    spelling,
+                    additive=True,
+                    override_key=grant.override_key,
+                    config_member=grant.config_member,
+                )
+            )
     return found
 
 
@@ -874,9 +1022,49 @@ def _added_members(live: Policy, target: Target) -> list[Grant]:
         if grant.key in target.bindings:
             continue
         current = _live_members(live.bindings.get(grant.key, ()))
-        if grant.member.casefold() not in current:
+        if member_key(grant.member) not in current:
             found.append(grant)
     return found
+
+
+def restorable_policy(policy: Policy, *, current: Policy) -> Policy:
+    """Drops purged `deleted:` tombstones that `setIamPolicy` would reject.
+
+    Google Cloud IAM rejects `deleted:` principals once they are purged
+    from the directory. Tombstones still present on the live binding or
+    audit log config stay so unpurged principals keep their grants.
+    """
+    bindings: dict[BindingKey, frozenset[str]] = {}
+    for key, members in policy.bindings.items():
+        live_members = current.bindings.get(key, frozenset())
+        kept = frozenset(
+            member
+            for member in members
+            if not member.startswith(_DELETED) or member in live_members
+        )
+        if kept:
+            bindings[key] = kept
+    audit_configs: dict[str, AuditConfigs] = {}
+    for service, configs in policy.audit_configs.items():
+        live_exempted = {
+            cfg.log_type: frozenset(cfg.exempted_members)
+            for cfg in current.audit_configs.get(service, ())
+        }
+        audit_configs[service] = _audit_configs(
+            AuditLogConfig(
+                cfg.log_type,
+                tuple(
+                    member
+                    for member in cfg.exempted_members
+                    if not member.startswith(_DELETED)
+                    or member in live_exempted.get(cfg.log_type, frozenset())
+                ),
+            )
+            for cfg in configs
+        )
+    return dataclasses.replace(
+        policy, bindings=bindings, audit_configs=audit_configs
+    )
 
 
 def target_from_policy(after: Policy, *, keys_of: Policy) -> Target:
@@ -901,6 +1089,8 @@ def target_from_policy(after: Policy, *, keys_of: Policy) -> Target:
 
 def _audit_detail(item: AuditOverwrite) -> str:
     """Says how an apply changes the live configs of one service."""
+    if item.live is None:
+        return f"{len(item.target or ())} log type configs are added"
     verb = "deleted" if item.target is None else "replaced"
     return f"{len(item.live)} live log type configs are {verb}"
 
@@ -913,12 +1103,12 @@ def rows(found: Diff, *, added: bool = False) -> list[tuple[str, str, str]]:
 
     Args:
         found: The diff.
-        added: Whether to list the added grants, which the review counts
-            only.
+        added: Whether to list the added grants and newly added audit
+            configs, which the deploy review omits.
 
     Returns:
         The removed grants, the added ones when asked, the audit config
-        overwrites and the conditional bindings the apply rewrites.
+        changes and the conditional bindings the apply rewrites.
     """
     listed = [
         ("removed", str(grant.key), grant.member) for grant in found.removed
@@ -930,6 +1120,7 @@ def rows(found: Diff, *, added: bool = False) -> list[tuple[str, str, str]]:
     listed += [
         ("audit", item.service, _audit_detail(item))
         for item in found.audit_overwrites
+        if added or item.live is not None
     ]
     listed += [
         ("rewrite", str(key), "conditional members change")

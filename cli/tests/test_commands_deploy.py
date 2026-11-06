@@ -178,6 +178,37 @@ def _gate_answers(cli_runner, cloud):
     }
 
 
+def _workload_ready(home):
+    """Writes a Stage 0 state holding the workload folder."""
+    workload = helpers_deploy.resource(
+        None,
+        "google_assured_workloads_workload",
+        "primary",
+        [
+            helpers_deploy.instance(
+                {
+                    "name": helpers_deploy.WORKLOAD,
+                    "resources": [
+                        {
+                            "resource_id": "222",
+                            "resource_type": "CONSUMER_FOLDER",
+                        }
+                    ],
+                },
+                0,
+            )
+        ],
+    )
+    doc = helpers_deploy.state_doc([workload])
+    env = helpers.env(home)
+    _write(env.workspace("0") / probe_lib.STATE_FILE, json.dumps(doc))
+    state = run_state.load(env)
+    state.step("s0.apply_workload").state = run_state.StateRecord(
+        lineage=doc["lineage"], serial=doc["serial"]
+    )
+    run_state.save(env, state, helpers_deploy.NOW)
+
+
 def _prompt_site(name, cli_runner, home, runner, cloud):
     """Sets up a deploy that reaches one prompt; returns its arguments."""
     if name == "manual":
@@ -201,8 +232,9 @@ def _prompt_site(name, cli_runner, home, runner, cloud):
         )
         return ["--only", "s0.migrate_state"]
     if name in _REMEDY_SITES:
-        return _remedy_site(name, cli_runner, runner)
+        return _remedy_site(name, cli_runner, home, runner)
     _gate_answers(cli_runner, cloud)
+    _workload_ready(home)
     helpers_deploy.script_plan(
         runner,
         helpers_deploy.plan_doc(
@@ -213,10 +245,12 @@ def _prompt_site(name, cli_runner, home, runner, cloud):
     return ["--only", "s0.apply_bootstrap", "--yes"]
 
 
-def _remedy_site(name, cli_runner, runner):
+def _remedy_site(name, cli_runner, home, runner):
     """Scripts a plan that fails twice, so a remedy prompt can be hit twice."""
     _rendered(cli_runner)
     output, step_id = _REMEDY_SITES[name]
+    if step_id == "s0.apply_bootstrap":
+        _workload_ready(home)
     runner.results["plan"] = [helpers_deploy.completed(output, 1)] * 2
     return ["--only", step_id]
 

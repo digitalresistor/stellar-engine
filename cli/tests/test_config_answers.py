@@ -175,6 +175,61 @@ def test_nested_comment_survives_removal_of_previous_nested_key(
     assert "compliance:\n  # Lab runs IL5.\n  regime: IL5\n" in saved
 
 
+def test_comment_above_sibling_survives_sequence_update_and_removal(
+    answers_path, repo
+):
+    home = answers_path.parents[2]
+    answers_lib.save(
+        answers_path,
+        helpers.minimal_answers(
+            existing_org_policies=[_POLICY],
+            overrides={
+                "0-bootstrap": {
+                    "iam": {
+                        "roles/viewer": ["user:a@example.com"],
+                        "roles/browser": ["domain:example.com"],
+                    }
+                }
+            },
+        ),
+    )
+    text = answers_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "overrides:\n",
+        "# Operator note above overrides.\noverrides:\n",
+    ).replace(
+        "      roles/browser:\n",
+        "      # Operator note above browser.\n      roles/browser:\n",
+    )
+    answers_path.write_text(text, encoding="utf-8")
+
+    def grow(data):
+        data["existing_org_policies"] = [_POLICY, _OTHER_POLICY]
+        data["overrides"]["0-bootstrap"]["iam"]["roles/viewer"].append(
+            "user:b@example.com"
+        )
+
+    answers_lib.update(answers_path, grow, repo=repo, home=home)
+    updated = answers_path.read_text(encoding="utf-8")
+    assert "# Operator note above overrides.\noverrides:\n" in updated
+    assert (
+        "      # Operator note above browser.\n      roles/browser:\n"
+        in updated
+    )
+
+    def drop(data):
+        data["existing_org_policies"] = []
+        del data["overrides"]["0-bootstrap"]["iam"]["roles/viewer"]
+
+    answers_lib.update(answers_path, drop, repo=repo, home=home)
+    cleared = answers_path.read_text(encoding="utf-8")
+    assert "# Operator note above overrides.\noverrides:\n" in cleared
+    assert (
+        "      # Operator note above browser.\n      roles/browser:\n"
+        in cleared
+    )
+
+
 def test_save_does_not_modify_previous(answers_path):
     answers_lib.save(answers_path, helpers.minimal_answers())
     previous = answers_lib.load_data(answers_path)
@@ -696,6 +751,7 @@ def test_to_preflight():
         "domain": conftest.DOMAIN,
         "customer_id": conftest.CUSTOMER_ID,
         "bootstrap_user": conftest.USER,
+        "stage0_phase": "bootstrap",
         "groups": {"gcp-devops": "platform"},
         "tenant_project_ids": (
             "tst-prod-ten1-iac-core-0",
@@ -714,6 +770,16 @@ def test_to_preflight():
         "billing_budget": False,
         "existing_org_policies": ("iam.allowedPolicyMemberDomains",),
         "stage0_iam_overrides": {},
+        "stage0_org_resources": {
+            "audit_config": True,
+            "custom_roles": True,
+            "iam": True,
+            "logging_settings": True,
+            "logging_sinks": True,
+            "org_policies": True,
+            "workforce_identity_pool": True,
+        },
+        "stage0_import_defaults": False,
     }
 
 

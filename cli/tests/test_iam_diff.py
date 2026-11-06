@@ -439,6 +439,83 @@ class TestTargetFromPlan:
         assert target.audit_configs == {"allServices": None}
         assert found.audit_overwrites[0].target is None
 
+    def test_audit_config_added_to_policy_without_audit_configs(self):
+        parsed = plan(
+            change(
+                "google_organization_iam_audit_config.organization",
+                ["create"],
+                after={
+                    "service": "allServices",
+                    "audit_log_config": [
+                        {"log_type": "ADMIN_READ", "exempted_members": []},
+                        {"log_type": "DATA_WRITE", "exempted_members": []},
+                    ],
+                },
+                kind=iam_diff.AUDIT_CONFIG_TYPE,
+            )
+        )
+        target = iam_diff.target_from_plan(parsed)
+        found = iam_diff.diff(iam_diff.Policy(), target)
+        assert found.audit_overwrites == (
+            iam_diff.AuditOverwrite(
+                "allServices",
+                None,
+                target.audit_configs["allServices"],
+            ),
+        )
+        assert not found.needs_review
+        assert iam_diff.rows(found) == []
+        assert iam_diff.rows(found, added=True) == [
+            ("audit", "allServices", "2 log type configs are added")
+        ]
+
+    def test_iam_policy_replaces_unlisted_bindings_and_audit_configs(self):
+        policy_json = json.dumps(
+            {
+                "bindings": [
+                    {"role": ORG_ADMIN, "members": ["user:new@example.com"]}
+                ]
+            }
+        )
+        parsed = plan(
+            change(
+                "google_organization_iam_policy.organization",
+                ["create"],
+                after={"org_id": conftest.ORG_ID, "policy_data": policy_json},
+                kind=iam_diff.POLICY_TYPE,
+            )
+        )
+        assert iam_diff.manages_iam(parsed)
+        target = iam_diff.target_from_plan(parsed)
+        assert target.authoritative_policy
+        live = iam_diff.Policy.from_json(gcloud_policy())
+        found = iam_diff.diff(live, target)
+        assert [str(grant) for grant in found.removed] == [
+            f"{DELEGATED} {STAGE0_SA} (condition {CONDITION['title']})",
+            f"{ORG_ADMIN} group:gcp-organization-admins@example.com",
+            f"{ORG_ADMIN} user:admin@example.com",
+        ]
+        assert [str(grant) for grant in found.added] == [
+            f"{ORG_ADMIN} user:new@example.com"
+        ]
+        assert [item.service for item in found.audit_overwrites] == [
+            "allServices"
+        ]
+        assert found.audit_overwrites[0].target is None
+
+    def test_unknown_iam_policy_data_fails_closed(self):
+        parsed = plan(
+            change(
+                "google_organization_iam_policy.organization",
+                ["create"],
+                after={"org_id": conftest.ORG_ID, "policy_data": None},
+                after_unknown={"policy_data": True},
+                kind=iam_diff.POLICY_TYPE,
+            )
+        )
+        with pytest.raises(iam_diff.UnknownMembersError):
+            iam_diff.target_from_plan(parsed)
+
 
 # Placeholder members that a shared org holds on 13 roles before Stage 0.
 _FOREIGN_ROLES = tuple(f"roles/example.role{index}" for index in range(13))
@@ -658,6 +735,32 @@ class TestDiff:
         )
         assert found.conditional_replacements == ()
 
+    def test_federated_principal_uris_preserve_case(self):
+        upper = (
+            "principal://iam.googleapis.com/projects/123456789012/"
+            "locations/global/workloadIdentityPools/pool/subject/Alice"
+        )
+        lower = upper.replace("/Alice", "/alice")
+        pset_upper = (
+            "principalSet://iam.googleapis.com/locations/global/"
+            "workforcePools/pool/attribute.team/SecOps"
+        )
+        pset_lower = pset_upper.replace("/SecOps", "/secops")
+        live = iam_diff.Policy.from_json(
+            {
+                "bindings": [
+                    {"role": ORG_ADMIN, "members": [upper, pset_upper]},
+                ]
+            }
+        )
+        target = iam_diff.Target(
+            {iam_diff.BindingKey(ORG_ADMIN): frozenset({lower, pset_lower})}
+        )
+        found = iam_diff.diff(live, target)
+        assert [grant.member for grant in found.removed] == [upper, pset_upper]
+        assert [grant.member for grant in found.added] == [lower, pset_lower]
+        assert found.kept_foreign == ()
+
 
 class TestKeepInOverrides:
     def test_authoritative_grants_go_to_iam(self):
@@ -681,6 +784,50 @@ class TestKeepInOverrides:
                 }
             }
         }
+
+    def test_additive_grants_preserve_custom_for_each_key_and_member_spelling(
+        self,
+    ):
+        before = {
+            "org_id": conftest.ORG_ID,
+            "role": _ROLE,
+            "member": "user:Bob@Example.com",
+        }
+        entry = change(
+            'module.organization.google_organization_iam_member.bindings["custom_bob_grant"]',
+            ["delete"],
+            before=before,
+            kind=iam_diff.MEMBER_TYPE,
+        )
+        entry["module_address"] = "module.organization"
+        entry["index"] = "custom_bob_grant"
+        target = iam_diff.target_from_plan(plan(entry))
+        live = _live({**before, "member": "user:bob@example.com"})
+        found = iam_diff.diff(live, target)
+        data = {}
+        iam_diff.keep_in_overrides(data, found.removed)
+        assert data["overrides"][paths.BOOTSTRAP] == {
+            "iam_bindings_additive": {
+                "custom_bob_grant": {
+                    "member": "user:Bob@Example.com",
+                    "role": _ROLE,
+                }
+            }
+        }
+
+    def test_federated_members_preserve_case_in_overrides(self):
+        upper = (
+            "principal://iam.googleapis.com/projects/123456789012/"
+            "locations/global/workloadIdentityPools/pool/subject/Alice"
+        )
+        lower = upper.replace("/Alice", "/alice")
+        data = {"overrides": {paths.BOOTSTRAP: {"iam": {ORG_ADMIN: [upper]}}}}
+        grant = iam_diff.Grant(iam_diff.BindingKey(ORG_ADMIN), lower)
+        iam_diff.keep_in_overrides(data, [grant])
+        assert data["overrides"][paths.BOOTSTRAP]["iam"][ORG_ADMIN] == [
+            upper,
+            lower,
+        ]
 
     @pytest.mark.parametrize("stage0", [None, {"iam": None}])
     def test_null_overrides_become_mappings(self, stage0):
@@ -807,9 +954,23 @@ class TestTargetFromRepo:
     def test_unresolved_holders_stay_out(self, repo):
         target = iam_diff.target_from_repo(repo, lambda holder: None, {})
         assert set(target.bindings) == {
-            iam_diff.BindingKey(role) for role in repo.authoritative_bindings()
+            iam_diff.BindingKey(role)
+            for role in repo.authoritative_bindings()
+            if role != "roles/browser"
         }
         assert all(not members for members in target.bindings.values())
+        with_domain = iam_diff.target_from_repo(
+            repo,
+            lambda holder: (
+                "domain:example.com"
+                if holder.kind == repo_lib.HolderKind.DOMAIN
+                else None
+            ),
+            {},
+        )
+        assert with_domain.bindings[iam_diff.BindingKey("roles/browser")] == {
+            "domain:example.com"
+        }
 
     def test_stage0_audit_configs(self, repo):
         configs = iam_diff.stage0_audit_configs(repo)

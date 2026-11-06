@@ -27,6 +27,7 @@ from stellar_engine import paths
 from stellar_engine import workspace as workspace_lib
 from stellar_engine.deploy import apply
 from stellar_engine.deploy import model
+from stellar_engine.deploy import run_state as run_state_lib
 from stellar_engine.render import pipeline
 from stellar_engine.terraform import runner as runner_lib
 
@@ -109,6 +110,21 @@ def _lineage_recorded(ctx: model.Context, lineage: str | None) -> bool:
     )
 
 
+def _unrecorded_verdict(
+    ctx: model.Context, step_id: str, current: run_state_lib.StateRecord
+) -> model.Verdict:
+    """Returns the verdict when run-state records no apply of `step_id`."""
+    if current.serial is None:
+        return model.Verdict(Status.PENDING, "The stage has no state yet.")
+    if not _lineage_recorded(ctx, current.lineage):
+        return model.Verdict(
+            Status.UNKNOWN,
+            f"run-state records no apply in the lineage of the state at "
+            f"{current}, so someone may have applied it without stellar.",
+        )
+    return model.Verdict(Status.PENDING, f"run-state records no {step_id}.")
+
+
 def applied_verdict(
     ctx: model.Context, step_id: str, stage: str, *, exact: bool
 ) -> model.Verdict:
@@ -140,18 +156,14 @@ def applied_verdict(
     record = ctx.run_state.steps.get(step_id)
     recorded = record.state if record else None
     if record is None or recorded is None:
-        if current.serial is None:
-            return model.Verdict(Status.PENDING, "The stage has no state yet.")
-        if not _lineage_recorded(ctx, current.lineage):
-            return model.Verdict(
-                Status.UNKNOWN,
-                f"run-state records no apply in the lineage of the state at "
-                f"{current}, so someone may have applied it without stellar.",
-            )
-        return model.Verdict(Status.PENDING, f"run-state records no {step_id}.")
+        return _unrecorded_verdict(ctx, step_id, current)
     if record.tfvars_sha256 != apply.inputs_sha256(ctx, stage):
         return model.Verdict(
             Status.PENDING, "The stage inputs changed since the last apply."
+        )
+    if render_verdict(ctx, stage).status != Status.DONE:
+        return model.Verdict(
+            Status.PENDING, "The workspace has unrendered answer changes."
         )
     moved = recorded.lineage != current.lineage or (
         recorded != current

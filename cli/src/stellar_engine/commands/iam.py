@@ -247,9 +247,25 @@ def _emit_overrides(
     `iam_diff_lib.keep_in_overrides`. The Stage 0 roles come from the target
     that preflight builds, whose members do not matter here.
     """
+    if not answers_lib.stage0_org_resources(answers)["iam"]:
+        typer.echo(
+            f"overrides.{paths.BOOTSTRAP}.deploy_org_resources.iam is false, "
+            "so Stage 0 manages no organization IAM bindings."
+        )
+        return
     target = iam_diff_lib.target_from_repo(
         session.repo,
-        lambda holder: None,
+        functools.partial(
+            iam_diff_lib.resolve_holder,
+            prefix=answers.prefix,
+            groups={},
+            bootstrap_user=(
+                answers.bootstrap_user
+                if answers.stage0_phase == models.STAGE0_BOOTSTRAP
+                else None
+            ),
+            domain=answers.organization.domain,
+        ),
         answers_lib.stage0_iam_overrides(answers),
     )
     roles = {key.role for key in target.bindings}
@@ -279,12 +295,16 @@ def _emit_overrides(
 
 
 def _write_policy(
-    cloud: model.Cloud, org_id: str, snap: iam_diff_lib.Snapshot, etag: str
+    cloud: model.Cloud,
+    org_id: str,
+    snap: iam_diff_lib.Snapshot,
+    current: iam_diff_lib.Policy,
 ) -> bool:
     """Writes a snapshot policy; returns False when the etag is stale."""
+    policy = iam_diff_lib.restorable_policy(snap.policy, current=current)
     try:
         cloud.set_org_iam_policy(
-            org_id, snap.policy, etag=etag, update_mask=_UPDATE_MASK
+            org_id, policy, etag=current.etag, update_mask=_UPDATE_MASK
         )
     except api.ConflictError:
         return False
@@ -306,8 +326,9 @@ def _restore_changes(
     current: iam_diff_lib.Policy, snap: iam_diff_lib.Snapshot
 ) -> iam_diff_lib.Diff:
     """Returns what writing a snapshot back changes in the live policy."""
+    policy = iam_diff_lib.restorable_policy(snap.policy, current=current)
     return iam_diff_lib.diff(
-        current, iam_diff_lib.target_from_policy(snap.policy, keys_of=current)
+        current, iam_diff_lib.target_from_policy(policy, keys_of=current)
     )
 
 
@@ -385,7 +406,7 @@ def _write_back(
             session, env, cloud, current, org_id=org_id, reason="restore"
         )
         typer.echo(f"Saved the live policy to {backup}.")
-        if _write_policy(cloud, org_id, snap, current.etag):
+        if _write_policy(cloud, org_id, snap, current):
             typer.echo(f"Restored the IAM policy of organization {org_id}.")
             return
     common.fail(

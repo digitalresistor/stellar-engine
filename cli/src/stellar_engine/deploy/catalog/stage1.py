@@ -186,7 +186,9 @@ def _check_billing_grant(ctx: model.Context) -> model.Verdict:
     policy = ctx.cloud.billing_account_iam(ctx.answers.billing.account_id)
     member = _resman_member(ctx)
     holders = policy.bindings.get(iam_diff.BindingKey(BILLING_ROLE), ())
-    if member in holders:
+    if iam_diff.member_key(member) in {
+        iam_diff.member_key(holder) for holder in holders
+    }:
         return model.Verdict(Status.DONE, f"{member} holds {BILLING_ROLE}.")
     return model.Verdict(
         Status.PENDING,
@@ -324,15 +326,40 @@ def _explain_verify(ctx: model.Context) -> str:
 
 
 def _check_verify(ctx: model.Context) -> model.Verdict:
-    """Checks that the inputs of Stages 2 and 3 exist."""
+    """Checks the Stage 2 and 3 inputs and the remote Stage 1 state."""
     missing = common.missing_outputs(ctx, workspace_lib.RESMAN_OUTPUTS)
+    target = probe_lib.backend(ctx.answers.prefix, STAGE)
+    remote = probe_lib.read_remote(ctx.cloud, target)
+    where = target.state_uri
+    # Raises when the remote state is unreadable, which reports UNKNOWN
+    # instead of judging from a state that could not be read.
+    summary = remote.readable_summary(target)
     if missing:
         return model.Verdict(
             Status.PENDING,
             f"fast-config/ lacks {', '.join(missing)}.",
             "Run the Stage 1 apply, which writes them.",
         )
-    return model.Verdict(Status.DONE, "The inputs of Stages 2 and 3 exist.")
+    if not remote.exists:
+        return model.Verdict(
+            Status.PENDING,
+            f"{where} does not exist.",
+            "Run the Stage 1 apply, which writes it.",
+        )
+    if summary is not None and not summary.parsed:
+        return model.Verdict(
+            Status.UNKNOWN, f"{where} is not a valid Terraform state."
+        )
+    if remote.empty:
+        return model.Verdict(
+            Status.PENDING,
+            f"{where} holds no Stage 1 resources.",
+            "Run the Stage 1 apply, which writes it.",
+        )
+    return model.Verdict(
+        Status.DONE,
+        f"The inputs of Stages 2 and 3 exist, and {where} is readable.",
+    )
 
 
 OUTPUTS = model.Step(
@@ -406,7 +433,7 @@ APPLY = model.Step(
     explain=_explain_apply,
     check=_check_apply,
     run=_run_apply,
-    requires=(RENDER.id,),
+    requires=(RENDER.id, BILLING_GRANT.id, PRECREATE_TENANTS.id),
     identity=_apply_identity,
     remedies=APPLY_REMEDIES,
 )

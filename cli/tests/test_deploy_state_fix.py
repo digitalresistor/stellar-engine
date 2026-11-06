@@ -237,6 +237,54 @@ def test_fix_stops_at_a_failed_import(tmp_path):
     assert "state push" not in helpers_deploy.subcommands(runner)
 
 
+def test_fix_rewrites_imported_buckets_when_a_later_import_fails(tmp_path):
+    runner = conftest.FakeTerraform(
+        results={
+            "import": [
+                helpers_deploy.completed("Import successful!"),
+                helpers_deploy.completed("Error: second failed", 1),
+            ]
+        }
+    )
+    ctx = _ctx(tmp_path, [True], runner=runner)
+    buckets = state_fix.log_buckets(ctx)[:2]
+    before = helpers_deploy.state_doc(serial=10)
+    partial = helpers_deploy.state_doc([_bucket(buckets[0].sink)], serial=11)
+    _script_pulls(runner, before, partial)
+    with pytest.raises(model.CommandError, match="import") as raised:
+        state_fix.fix_log_buckets(ctx, buckets, step_id="s0.apply_final")
+    assert raised.value.command == "import"
+    assert "second failed" in raised.value.output
+    (push,) = [
+        args for args, _ in runner.calls if args[:2] == ("state", "push")
+    ]
+    pushed = json.loads(pathlib.Path(push[-1]).read_text(encoding="utf-8"))
+    assert pushed["serial"] == 12
+    assert _projects(pushed) == {buckets[0].address: _PROJECT}
+    (confirmation,) = ctx.record("s0.apply_final").confirmations
+    assert "imported 1; fixed 1; serial 10, pushed 12" in confirmation.detail
+
+
+def test_log_buckets_honor_stage0_overrides(tmp_path):
+    answers = helpers.minimal_answers(
+        logging={"sink_type": "storage"},
+        overrides={
+            "0-bootstrap": {
+                "regions": {"primary": "us-central1"},
+                "log_sinks": {
+                    "custom-audit": {"type": "logging", "filter": ""},
+                    "archive": {"type": "storage", "filter": ""},
+                },
+            }
+        },
+    )
+    (bucket,) = state_fix.log_buckets(_ctx(tmp_path, answers=answers))
+    assert bucket.sink == "custom-audit"
+    assert bucket.import_id == (
+        f"projects/{_PROJECT}/locations/us-central1/buckets/custom-audit"
+    )
+
+
 def test_fix_stops_at_a_failed_pull(tmp_path):
     runner = conftest.FakeTerraform(
         results={"state pull": [helpers_deploy.completed("", 1, "locked")]}

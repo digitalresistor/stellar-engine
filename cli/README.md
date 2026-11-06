@@ -727,7 +727,7 @@ flag use.
 | `s1.billing_grant` | manual | Grants the Stage 1 service account billing access. |
 | `s1.precreate_tenants` | manual | Lists the tenant projects to pre-create and import. |
 | `s1.apply` | auto | Applies Stage 1. |
-| `s1.verify` | check | Checks the inputs of Stages 2 and 3. |
+| `s1.verify` | check | Checks the inputs of Stages 2 and 3 and the remote Stage 1 state. |
 
 - An `auto` step runs on its own.
 - A `manual` step waits for your confirmation.
@@ -782,8 +782,8 @@ catalog order.
   the `pre.iam_roles` step, and allowing the BigQuery services on the
   workload folder in the `s0.allow_bq` step.
 - The `--yes` flag also enables a disabled API in the bootstrap project or
-  in a project whose ID starts with the prefix, while any other project
-  always asks first.
+  in a project that the deployment creates or imports, while any other
+  project always asks first.
 - The `s0.allow_bq` step lists every service that Assured Workloads allows
   along with BigQuery, and the `--yes` flag answers it only when each one
   is a BigQuery service.
@@ -975,7 +975,9 @@ under the `iam-snapshots/` folder.
   `overrides.0-bootstrap.iam_bindings_additive` answer under the key that
   Stage 0 gives it, so the apply keeps the grant and leaves the other
   members of the role alone.
-- The review compares members without case, as the provider does.
+- The review compares email and domain principals without case and keeps
+  the case of `principal://` and `principalSet://` principals, as Google
+  Cloud IAM does.
 - Both confirming and skipping ask you to type the organization ID, and
   run-state records the decision.
 - The `--yes` flag never answers the review.
@@ -983,8 +985,8 @@ under the `iam-snapshots/` folder.
   again when someone changed the policy in the meantime.
 - A policy that changes three times during the review stops the deploy, so
   you can find out who edits it before you rerun the deploy.
-- A role whose member list grows in the answers loses the comments inside
-  that list, while new roles keep every comment.
+- A role whose member list changes in the answers loses the comments
+  inside that list, while comments after the list and on other roles stay.
 
 ### 11.2 IAM commands
 

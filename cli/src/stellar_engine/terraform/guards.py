@@ -83,9 +83,13 @@ ORG_IAM_POLICY_TYPE = "google_organization_iam_policy"
 # A targeted workload or folder plan also applies the organization logging
 # settings that both depend on, which set the default log storage location
 # of new projects across the organization.
-ORG_LOGGING_SETTINGS = (
-    "module.organization-logging."
-    "google_logging_organization_settings.default[0]"
+ORG_LOGGING_SETTINGS = frozenset(
+    {
+        "module.organization-logging[0]."
+        "google_logging_organization_settings.default[0]",
+        "module.organization-logging."
+        "google_logging_organization_settings.default[0]",
+    }
 )
 _LEVEL_ORDER = (Level.BLOCK, Level.CONFIRM, Level.INFO)
 
@@ -421,7 +425,7 @@ def _targeted_scope(
             continue
         if change.address in targets or _in_module(change, targets):
             continue
-        if change.address == ORG_LOGGING_SETTINGS:
+        if change.address in ORG_LOGGING_SETTINGS:
             found.append(
                 Finding(
                     Level.INFO,

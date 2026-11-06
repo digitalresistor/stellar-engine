@@ -31,6 +31,7 @@ class to the exit status. `render` renders a stage workspace for the steps
 that need one, and `apply.apply_pipeline` applies Terraform.
 """
 
+import collections
 from collections.abc import Sequence
 import dataclasses
 import functools
@@ -301,13 +302,22 @@ def _done(
 def _require(
     ctx: model.Context, step: model.Step, index: dict[str, model.Step]
 ) -> None:
-    """Stops before a step whose prerequisites are not done."""
-    for required in step.requires:
+    """Stops before a step whose direct or transitive prerequisites lag."""
+    queue = collections.deque(step.requires)
+    seen: set[str] = set()
+    while queue:
+        required = queue.popleft()
+        if required in seen:
+            continue
+        seen.add(required)
         if not _done(ctx, required, index):
             raise model.StoppedError(
                 f"{step.id} needs {required} first.",
                 remedy=f"Run {ctx.deploy_command(required)} first.",
             )
+        upstream = index.get(required)
+        if upstream is not None and applies(ctx, upstream):
+            queue.extend(upstream.requires)
 
 
 def _manual(
