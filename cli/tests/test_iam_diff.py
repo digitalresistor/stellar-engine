@@ -439,6 +439,83 @@ class TestTargetFromPlan:
         assert target.audit_configs == {"allServices": None}
         assert found.audit_overwrites[0].target is None
 
+    def test_audit_config_added_to_policy_without_audit_configs(self):
+        parsed = plan(
+            change(
+                "google_organization_iam_audit_config.organization",
+                ["create"],
+                after={
+                    "service": "allServices",
+                    "audit_log_config": [
+                        {"log_type": "ADMIN_READ", "exempted_members": []},
+                        {"log_type": "DATA_WRITE", "exempted_members": []},
+                    ],
+                },
+                kind=iam_diff.AUDIT_CONFIG_TYPE,
+            )
+        )
+        target = iam_diff.target_from_plan(parsed)
+        found = iam_diff.diff(iam_diff.Policy(), target)
+        assert found.audit_overwrites == (
+            iam_diff.AuditOverwrite(
+                "allServices",
+                None,
+                target.audit_configs["allServices"],
+            ),
+        )
+        assert not found.needs_review
+        assert iam_diff.rows(found) == []
+        assert iam_diff.rows(found, added=True) == [
+            ("audit", "allServices", "2 log type configs are added")
+        ]
+
+    def test_iam_policy_replaces_unlisted_bindings_and_audit_configs(self):
+        policy_json = json.dumps(
+            {
+                "bindings": [
+                    {"role": ORG_ADMIN, "members": ["user:new@example.com"]}
+                ]
+            }
+        )
+        parsed = plan(
+            change(
+                "google_organization_iam_policy.organization",
+                ["create"],
+                after={"org_id": conftest.ORG_ID, "policy_data": policy_json},
+                kind=iam_diff.POLICY_TYPE,
+            )
+        )
+        assert iam_diff.manages_iam(parsed)
+        target = iam_diff.target_from_plan(parsed)
+        assert target.authoritative_policy
+        live = iam_diff.Policy.from_json(gcloud_policy())
+        found = iam_diff.diff(live, target)
+        assert [str(grant) for grant in found.removed] == [
+            f"{DELEGATED} {STAGE0_SA} (condition {CONDITION['title']})",
+            f"{ORG_ADMIN} group:gcp-organization-admins@example.com",
+            f"{ORG_ADMIN} user:admin@example.com",
+        ]
+        assert [str(grant) for grant in found.added] == [
+            f"{ORG_ADMIN} user:new@example.com"
+        ]
+        assert [item.service for item in found.audit_overwrites] == [
+            "allServices"
+        ]
+        assert found.audit_overwrites[0].target is None
+
+    def test_unknown_iam_policy_data_fails_closed(self):
+        parsed = plan(
+            change(
+                "google_organization_iam_policy.organization",
+                ["create"],
+                after={"org_id": conftest.ORG_ID, "policy_data": None},
+                after_unknown={"policy_data": True},
+                kind=iam_diff.POLICY_TYPE,
+            )
+        )
+        with pytest.raises(iam_diff.UnknownMembersError):
+            iam_diff.target_from_plan(parsed)
+
 
 # Placeholder members that a shared org holds on 13 roles before Stage 0.
 _FOREIGN_ROLES = tuple(f"roles/example.role{index}" for index in range(13))

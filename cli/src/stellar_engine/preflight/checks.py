@@ -1641,10 +1641,11 @@ def _iam_detail(found):
             "roles."
         )
     for overwrite in found.audit_overwrites:
-        detail += (
-            f" It replaces the existing {overwrite.service} audit log "
-            "configuration."
-        )
+        if overwrite.live is not None:
+            detail += (
+                f" It replaces the existing {overwrite.service} audit log "
+                "configuration."
+            )
     return detail
 
 
@@ -1675,11 +1676,12 @@ def _iam_result(ctx, org_id):
             f"Cannot read the organization IAM policy: {error}",
         )
     found = iam_diff.diff(live, _iam_target(ctx))
+    overwrites = any(item.live is not None for item in found.audit_overwrites)
     return CheckResult(
         check_id,
         Category.SHARED_ORG,
         title,
-        Status.WARN if found.removed or found.audit_overwrites else Status.PASS,
+        Status.WARN if found.removed or overwrites else Status.PASS,
         _iam_detail(found),
         remedy=(
             "Review these grants with the organization administrators "

@@ -177,16 +177,35 @@ class TestPipeline:
             apply.apply_pipeline(ctx, _STEP, "0")
 
     def test_a_whole_policy_change_needs_the_operator(self, tmp_path):
-        # The review models bindings and audit configs only, so this
-        # change gets no review and `--yes` must not apply it.
+        # Whole-policy changes run the IAM review (saving a gate snapshot)
+        # and also trigger iam_policy_replace so `--yes` never applies them.
         doc = helpers_deploy.plan_doc([_org_policy_resource()])
-        ctx, runner = _pipeline(tmp_path, [doc], interactive=False, yes=True)
+        ctx, runner = _pipeline(
+            tmp_path / "empty", [doc], interactive=False, yes=True
+        )
         with pytest.raises(
             model.InputRequiredError, match="iam_policy_replace"
         ):
             apply.apply_pipeline(ctx, _STEP, "0")
         assert not _calls(runner, "apply")
-        assert not ctx.run_state.iam.snapshots
+        (snapshot,) = ctx.run_state.iam.snapshots
+        assert snapshot.reason == "gate"
+
+        # When the live policy holds bindings that policy_data omits, the IAM
+        # review stops first to review the removed grants.
+        cloud = conftest.FakeCloud(policy=_policy(_GROUP))
+        ctx_live, runner_live = _pipeline(
+            tmp_path / "live",
+            [doc],
+            interactive=False,
+            yes=True,
+            cloud=cloud,
+        )
+        with pytest.raises(
+            model.InputRequiredError, match="How do you want to go on"
+        ):
+            apply.apply_pipeline(ctx_live, _STEP, "0")
+        assert not _calls(runner_live, "apply")
 
     def test_a_whole_policy_change_declined(self, tmp_path):
         doc = helpers_deploy.plan_doc([_org_policy_resource()])

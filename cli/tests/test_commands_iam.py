@@ -363,3 +363,74 @@ def test_restore_emit_overrides_skips_when_org_iam_is_disabled(
     assert "deploy_org_resources.iam is false" in outcome.output
     answers = helpers.load_answers(isolated_home)
     assert "iam" not in answers.overrides["0-bootstrap"]
+
+
+def test_restore_recovers_deleted_audit_configs(
+    cli_runner, isolated_home, cloud_env, monkeypatch
+):
+    with_audit = _policy({_STAGE0_ROLE: [_OLD]})
+    with_audit["auditConfigs"] = [
+        {
+            "service": "allServices",
+            "auditLogConfigs": [{"logType": "ADMIN_READ"}],
+        }
+    ]
+    cloud_env.policy = with_audit
+    path = _snapshot(cli_runner, isolated_home)
+    # Remove auditConfigs from the live policy while keeping bindings equal.
+    cloud_env.policy = _policy({_STAGE0_ROLE: [_OLD]}, etag="BwYDDDDDDDD=")
+    _replies(monkeypatch, conftest.ORG_ID)
+    outcome = _iam(cli_runner, "restore", str(path))
+    assert outcome.exit_code == 0, outcome.output
+    assert _row(
+        outcome.output, "audit", "allServices", "1 log type configs are added"
+    )
+    (write,) = cloud_env.writes
+    assert "allServices" in write[2].audit_configs
+
+
+def test_restore_strips_purged_deleted_tombstones_but_keeps_live_ones(
+    cli_runner, isolated_home, cloud_env, monkeypatch
+):
+    purged = "deleted:user:purged@example.com?uid=1"
+    recent = "deleted:user:recent@example.com?uid=2"
+    snap_policy = _policy(
+        {
+            _STAGE0_ROLE: [_OLD, purged, recent],
+            "roles/browser": [purged],
+        }
+    )
+    snap_policy["auditConfigs"] = [
+        {
+            "service": "allServices",
+            "auditLogConfigs": [
+                {
+                    "logType": "DATA_READ",
+                    "exemptedMembers": [_OLD, purged, recent],
+                }
+            ],
+        }
+    ]
+    cloud_env.policy = snap_policy
+    path = _snapshot(cli_runner, isolated_home)
+    live_policy = _policy({_STAGE0_ROLE: [_NEW, recent]}, etag="BwYEEEEEEEE=")
+    live_policy["auditConfigs"] = [
+        {
+            "service": "allServices",
+            "auditLogConfigs": [
+                {"logType": "DATA_READ", "exemptedMembers": [recent]}
+            ],
+        }
+    ]
+    cloud_env.policy = live_policy
+    _replies(monkeypatch, conftest.ORG_ID)
+    outcome = _iam(cli_runner, "restore", str(path))
+    assert outcome.exit_code == 0, outcome.output
+    (write,) = cloud_env.writes
+    written = write[2]
+    assert written.bindings == {
+        iam_diff.BindingKey(_STAGE0_ROLE): frozenset({_OLD, recent})
+    }
+    assert written.audit_configs["allServices"] == (
+        iam_diff.AuditLogConfig("DATA_READ", (recent, _OLD)),
+    )
