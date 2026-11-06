@@ -658,6 +658,32 @@ class TestDiff:
         )
         assert found.conditional_replacements == ()
 
+    def test_federated_principal_uris_preserve_case(self):
+        upper = (
+            "principal://iam.googleapis.com/projects/123456789012/"
+            "locations/global/workloadIdentityPools/pool/subject/Alice"
+        )
+        lower = upper.replace("/Alice", "/alice")
+        pset_upper = (
+            "principalSet://iam.googleapis.com/locations/global/"
+            "workforcePools/pool/attribute.team/SecOps"
+        )
+        pset_lower = pset_upper.replace("/SecOps", "/secops")
+        live = iam_diff.Policy.from_json(
+            {
+                "bindings": [
+                    {"role": ORG_ADMIN, "members": [upper, pset_upper]},
+                ]
+            }
+        )
+        target = iam_diff.Target(
+            {iam_diff.BindingKey(ORG_ADMIN): frozenset({lower, pset_lower})}
+        )
+        found = iam_diff.diff(live, target)
+        assert [grant.member for grant in found.removed] == [upper, pset_upper]
+        assert [grant.member for grant in found.added] == [lower, pset_lower]
+        assert found.kept_foreign == ()
+
 
 class TestKeepInOverrides:
     def test_authoritative_grants_go_to_iam(self):
@@ -681,6 +707,50 @@ class TestKeepInOverrides:
                 }
             }
         }
+
+    def test_additive_grants_preserve_custom_for_each_key_and_member_spelling(
+        self,
+    ):
+        before = {
+            "org_id": conftest.ORG_ID,
+            "role": _ROLE,
+            "member": "user:Bob@Example.com",
+        }
+        entry = change(
+            'module.organization.google_organization_iam_member.bindings["custom_bob_grant"]',
+            ["delete"],
+            before=before,
+            kind=iam_diff.MEMBER_TYPE,
+        )
+        entry["module_address"] = "module.organization"
+        entry["index"] = "custom_bob_grant"
+        target = iam_diff.target_from_plan(plan(entry))
+        live = _live({**before, "member": "user:bob@example.com"})
+        found = iam_diff.diff(live, target)
+        data = {}
+        iam_diff.keep_in_overrides(data, found.removed)
+        assert data["overrides"][paths.BOOTSTRAP] == {
+            "iam_bindings_additive": {
+                "custom_bob_grant": {
+                    "member": "user:Bob@Example.com",
+                    "role": _ROLE,
+                }
+            }
+        }
+
+    def test_federated_members_preserve_case_in_overrides(self):
+        upper = (
+            "principal://iam.googleapis.com/projects/123456789012/"
+            "locations/global/workloadIdentityPools/pool/subject/Alice"
+        )
+        lower = upper.replace("/Alice", "/alice")
+        data = {"overrides": {paths.BOOTSTRAP: {"iam": {ORG_ADMIN: [upper]}}}}
+        grant = iam_diff.Grant(iam_diff.BindingKey(ORG_ADMIN), lower)
+        iam_diff.keep_in_overrides(data, [grant])
+        assert data["overrides"][paths.BOOTSTRAP]["iam"][ORG_ADMIN] == [
+            upper,
+            lower,
+        ]
 
     @pytest.mark.parametrize("stage0", [None, {"iam": None}])
     def test_null_overrides_become_mappings(self, stage0):

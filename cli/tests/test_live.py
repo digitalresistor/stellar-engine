@@ -915,6 +915,9 @@ def test_add_billing_account_binding_is_idempotent(monkeypatch):
     cloud.add_billing_account_binding(
         conftest.BILLING, "roles/billing.viewer", "user:a@example.com"
     )
+    cloud.add_billing_account_binding(
+        conftest.BILLING, "roles/billing.viewer", "user:A@Example.com"
+    )
     assert set_policy.calls == []
 
 

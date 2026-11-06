@@ -52,6 +52,9 @@ _UNCHANGED_ACTIONS = ("no-op", "read", "forget")
 _BINDING_FIELDS = ("members", "role", "condition")
 _MEMBER_FIELDS = ("member", "role", "condition")
 _AUDIT_FIELDS = ("service", "audit_log_config")
+_ORG_ADDITIVE_PREFIX = (
+    "module.organization.google_organization_iam_member.bindings["
+)
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SNAPSHOT_SUFFIX = ".json"
 _META_SUFFIX = ".meta.json"
@@ -285,6 +288,18 @@ class Target:
         )
 
 
+def member_key(member: str) -> str:
+    """Returns the comparison key of an IAM member string.
+
+    Email and domain principals compare without case in Google Cloud IAM,
+    whereas URI-formatted federated principals (`principal://` and
+    `principalSet://`) carry case-sensitive subjects and attributes.
+    """
+    if "://" in member:
+        return member
+    return member.casefold()
+
+
 @dataclasses.dataclass(frozen=True)
 class Grant:
     """One member of one binding.
@@ -294,11 +309,17 @@ class Grant:
         member: Principal, such as `user:admin@example.com`.
         additive: Whether an additive `google_organization_iam_member`
             grants it, rather than an authoritative binding.
+        override_key: The `iam_bindings_additive` key in Stage 0 when a
+            plan deletes a `module.organization` additive binding.
+        config_member: The member spelling in Terraform state before a
+            plan deletes an additive binding.
     """
 
     key: BindingKey
     member: str
     additive: bool = False
+    override_key: str | None = dataclasses.field(default=None, compare=False)
+    config_member: str | None = dataclasses.field(default=None, compare=False)
 
     def sort_key(self) -> tuple[str, str, str]:
         """Returns a key that orders grants by binding, then member."""
@@ -540,6 +561,26 @@ def _plan_configs(values):
     )
 
 
+def _additive_override_key(change: plan_lib.Change) -> str | None:
+    """Returns the `iam_bindings_additive` key of a Stage 0 additive grant."""
+    if (
+        change.module_address == "module.organization"
+        and change.name == "bindings"
+        and isinstance(change.index, str)
+    ):
+        return change.index
+    if change.address.startswith(
+        _ORG_ADDITIVE_PREFIX
+    ) and change.address.endswith("]"):
+        raw = change.address[len(_ORG_ADDITIVE_PREFIX) : -1]
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, str) else None
+    return None
+
+
 def _plan_change(change: plan_lib.Change, bindings, audit_configs, members):
     """Adds what one IAM change sets to the target.
 
@@ -557,7 +598,16 @@ def _plan_change(change: plan_lib.Change, bindings, audit_configs, members):
         # as a removal.
         removed, added = members
         if change.deletes and before:
-            removed.add(Grant(_plan_key(before), _text(before, "member"), True))
+            raw_member = _text(before, "member")
+            removed.add(
+                Grant(
+                    _plan_key(before),
+                    raw_member,
+                    True,
+                    override_key=_additive_override_key(change),
+                    config_member=raw_member,
+                )
+            )
         known = not any(
             plan_lib.has_unknown(unknown.get(field)) for field in _MEMBER_FIELDS
         )
@@ -747,8 +797,8 @@ def keep_in_overrides(data: dict[str, Any], grants: Iterable[Grant]) -> None:
     it; adding the member to the authoritative binding instead would drop
     every other member of that role. New entries are appended, which
     keeps the comments of the answers file; a role whose member list
-    grows loses the comments inside that list. Members compare without
-    case, as the provider compares them.
+    grows loses the comments inside that list. Email and domain members
+    compare without case, while federated principal URIs preserve case.
 
     Args:
         data: Answer data, as `config.answers.update` passes it to its
@@ -763,10 +813,23 @@ def keep_in_overrides(data: dict[str, Any], grants: Iterable[Grant]) -> None:
     for grant in grants:
         if grant.additive:
             additive = _mapping(stage0, "iam_bindings_additive")
-            additive.setdefault(
-                additive_key(grant),
-                {"member": grant.member, "role": grant.key.role},
-            )
+            member = grant.config_member or grant.member
+            if grant.override_key is not None:
+                additive.setdefault(
+                    grant.override_key,
+                    {"member": member, "role": grant.key.role},
+                )
+            elif not any(
+                isinstance(entry, Mapping)
+                and entry.get("role") == grant.key.role
+                and member_key(str(entry.get("member", "")))
+                == member_key(member)
+                for entry in additive.values()
+            ):
+                additive.setdefault(
+                    additive_key(grant),
+                    {"member": member, "role": grant.key.role},
+                )
             continue
         iam = _mapping(stage0, "iam")
         members = iam.get(grant.key.role)
@@ -777,20 +840,20 @@ def keep_in_overrides(data: dict[str, Any], grants: Iterable[Grant]) -> None:
                 f"overrides.{paths.BOOTSTRAP}.iam.{grant.key.role} must be "
                 "a list of members."
             )
-        if grant.member.casefold() not in {
-            str(member).casefold() for member in members
+        if member_key(grant.member) not in {
+            member_key(str(member)) for member in members
         }:
             members.append(grant.member)
 
 
 def _live_members(members) -> dict[str, str]:
-    """Maps each member without case to its spelling, without deleted ones.
+    """Maps each member key to its spelling, without deleted principals.
 
-    The provider compares members without case, so `group:Admins@x` and
-    `group:admins@x` are one member to Terraform.
+    Email and domain members compare without case, whereas federated
+    `principal://` and `principalSet://` URIs compare with exact case.
     """
     return {
-        member.casefold(): member
+        member_key(member): member
         for member in sorted(members, reverse=True)
         if not member.startswith(_DELETED)
     }
@@ -818,8 +881,8 @@ def diff(live: Policy, target: Target) -> Diff:
     Returns:
         The grants removed, added and kept, sorted by role, condition and
         member, and the audit configs and conditional bindings the apply
-        rewrites. Members compare without case and keep their live
-        spelling.
+        rewrites. Email and domain members compare without case and keep
+        their live spelling; federated principal URIs preserve case.
     """
     removed, added, kept, conditional = [], [], [], []
     for key, members in target.bindings.items():
@@ -849,13 +912,13 @@ def diff(live: Policy, target: Target) -> Diff:
 
 def _kept_by_target(target: Target, grant: Grant) -> bool:
     """Returns whether the apply still grants the member of a grant."""
-    member = grant.member.casefold()
+    member = member_key(grant.member)
     recreated = {
-        (other.key, other.member.casefold()) for other in target.added_members
+        (other.key, member_key(other.member)) for other in target.added_members
     }
     wanted = target.bindings.get(grant.key) or ()
     return (grant.key, member) in recreated or member in {
-        other.casefold() for other in wanted
+        member_key(other) for other in wanted
     }
 
 
@@ -872,9 +935,17 @@ def _removed_members(live: Policy, target: Target) -> list[Grant]:
         if grant.key in target.bindings or _kept_by_target(target, grant):
             continue
         current = _live_members(live.bindings.get(grant.key, ()))
-        spelling = current.get(grant.member.casefold())
+        spelling = current.get(member_key(grant.member))
         if spelling is not None:
-            found.append(Grant(grant.key, spelling, additive=True))
+            found.append(
+                Grant(
+                    grant.key,
+                    spelling,
+                    additive=True,
+                    override_key=grant.override_key,
+                    config_member=grant.config_member,
+                )
+            )
     return found
 
 
@@ -885,7 +956,7 @@ def _added_members(live: Policy, target: Target) -> list[Grant]:
         if grant.key in target.bindings:
             continue
         current = _live_members(live.bindings.get(grant.key, ()))
-        if grant.member.casefold() not in current:
+        if member_key(grant.member) not in current:
             found.append(grant)
     return found
 

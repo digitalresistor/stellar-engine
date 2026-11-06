@@ -975,7 +975,9 @@ under the `iam-snapshots/` folder.
   `overrides.0-bootstrap.iam_bindings_additive` answer under the key that
   Stage 0 gives it, so the apply keeps the grant and leaves the other
   members of the role alone.
-- The review compares members without case, as the provider does.
+- The review compares email and domain principals without case and keeps
+  the case of `principal://` and `principalSet://` principals, as Google
+  Cloud IAM does.
 - Both confirming and skipping ask you to type the organization ID, and
   run-state records the decision.
 - The `--yes` flag never answers the review.

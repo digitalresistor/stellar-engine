@@ -223,6 +223,30 @@ class TestIamGate:
         }
         assert len(ctx.run_state.iam.snapshots) == 1
 
+    def test_a_custom_key_member_delete_preserves_key_and_member_spelling(
+        self, tmp_path
+    ):
+        mixed = "user:Old@Example.com"
+        values = {"org_id": conftest.ORG_ID, "role": _ROLE, "member": mixed}
+        entry = helpers_deploy.change(
+            'module.organization.google_organization_iam_member.bindings["custom_old"]',
+            "google_organization_iam_member",
+            ("delete",),
+            module_address="module.organization",
+            before=values,
+        )
+        entry["index"] = "custom_old"
+        delete = helpers_deploy.plan_doc([entry])
+        kept = helpers_deploy.plan_doc(applyable=False)
+        ctx, runner, _ = self._run(tmp_path, [_KEEP], docs=[delete, kept])
+        assert not apply.apply_pipeline(ctx, _STEP, "0").applied
+        assert len(_calls(runner, "plan")) == 2
+        assert ctx.answers.overrides["0-bootstrap"] == {
+            "iam_bindings_additive": {
+                "custom_old": {"member": mixed, "role": _ROLE}
+            }
+        }
+
     def test_keep_replaces_a_null_iam_override(self, tmp_path):
         answers = helpers.minimal_answers(
             overrides={"0-bootstrap": {"iam": None}}

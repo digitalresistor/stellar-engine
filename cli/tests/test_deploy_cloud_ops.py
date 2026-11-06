@@ -126,6 +126,17 @@ def test_grant_roles_keeps_the_existing_members(tmp_path):
     assert _members(cloud, role) == {other, f"user:{conftest.USER}"}
 
 
+def test_grant_roles_matches_existing_members_without_case(tmp_path):
+    role = _ORG_ROLES[0]
+    mixed = f"user:{conftest.USER.upper()}"
+    policy = conftest.empty_policy()
+    policy["bindings"] = [{"role": role, "members": [mixed]}]
+    cloud = _lacking(role, policy=policy)
+    ctx = _ctx(tmp_path, yes=True, cloud=cloud)
+    assert cloud_ops.grant_roles(ctx) == []
+    assert cloud.writes == []
+
+
 def test_grant_roles_types_a_service_account(tmp_path):
     principal = api.Principal(_SA_EMAIL, api.PrincipalKind.SERVICE_ACCOUNT)
     cloud = _lacking(principal=principal)

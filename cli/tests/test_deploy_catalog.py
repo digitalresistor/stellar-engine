@@ -1052,6 +1052,15 @@ def test_billing_grant_reads_and_grants_billing_user(tmp_path):
         )
     ]
     assert _check(ctx, "s1.billing_grant").status == _S.DONE
+    _fake(ctx).billing_policy = {
+        "bindings": [
+            {
+                "role": "roles/billing.user",
+                "members": [f"serviceAccount:{_RESMAN_SA.upper()}"],
+            }
+        ]
+    }
+    assert _check(ctx, "s1.billing_grant").status == _S.DONE
     _fake(ctx).billing_policy = api.CloudError("denied")
     assert _check(ctx, "s1.billing_grant").status == _S.UNKNOWN
 

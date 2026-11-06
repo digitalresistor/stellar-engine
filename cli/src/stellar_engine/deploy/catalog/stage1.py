@@ -186,7 +186,9 @@ def _check_billing_grant(ctx: model.Context) -> model.Verdict:
     policy = ctx.cloud.billing_account_iam(ctx.answers.billing.account_id)
     member = _resman_member(ctx)
     holders = policy.bindings.get(iam_diff.BindingKey(BILLING_ROLE), ())
-    if member in holders:
+    if iam_diff.member_key(member) in {
+        iam_diff.member_key(holder) for holder in holders
+    }:
         return model.Verdict(Status.DONE, f"{member} holds {BILLING_ROLE}.")
     return model.Verdict(
         Status.PENDING,

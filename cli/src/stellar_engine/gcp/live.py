@@ -689,7 +689,9 @@ class LiveCloudApi:
         )
         if binding is None:
             binding = policy.bindings.add(role=role)
-        if member in binding.members:
+        if iam_diff.member_key(member) in {
+            iam_diff.member_key(existing) for existing in binding.members
+        }:
             return
         binding.members.append(member)
         # The policy carries the etag of the read, so a concurrent change
