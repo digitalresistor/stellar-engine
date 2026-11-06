@@ -406,7 +406,7 @@ APPLY = model.Step(
     explain=_explain_apply,
     check=_check_apply,
     run=_run_apply,
-    requires=(RENDER.id,),
+    requires=(RENDER.id, BILLING_GRANT.id, PRECREATE_TENANTS.id),
     identity=_apply_identity,
     remedies=APPLY_REMEDIES,
 )

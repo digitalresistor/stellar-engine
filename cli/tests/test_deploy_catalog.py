@@ -1100,7 +1100,9 @@ def test_stage1_apply_records_the_remote_state(tmp_path):
     bucket = "tst-prod-iac-core-resman-0"
     cloud = conftest.FakeCloud()
     ctx = _ctx(tmp_path, cloud=cloud)
-    ctx.workspace("1").mkdir(parents=True)
+    for name in workspace_lib.OUTPUT_LINKS[paths.RESMAN]:
+        _write(ctx.env.fast_config / name, "{}")
+    _run(stage1.RENDER, ctx)
     assert _check(ctx, "s1.apply").status == _S.PENDING
     cloud.objects[(bucket, probe_lib.REMOTE_OBJECT)] = api.ObjectData(
         _bytes(helpers_deploy.project_state(4)), 9
@@ -1108,6 +1110,39 @@ def test_stage1_apply_records_the_remote_state(tmp_path):
     ctx.save()
     _record_apply(ctx, "s1.apply", "1")
     assert _check(ctx, "s1.apply").status == _S.DONE
+    # Editing answers without re-rendering marks s1.apply pending again.
+    ctx.answers = helpers.minimal_answers(
+        resman={
+            "envs": {"Prod": {}},
+            "tenants": {"t1": {"descriptive_name": "t1"}},
+        }
+    )
+    verdict = _check(ctx, "s1.apply")
+    assert verdict.status == _S.PENDING
+    assert "unrendered answer changes" in verdict.detail
+
+
+def test_apply_final_stops_when_answers_change_without_rendering(tmp_path):
+    answers = helpers.minimal_answers(stage0_phase="final")
+    ctx = _ctx(tmp_path, answers=answers)
+    _run(stage0.RENDER, ctx)
+    _migrated(ctx, serial=298, generation=17)
+    _record_apply(ctx, "s0.apply_bootstrap")
+    _record_apply(ctx, "s0.apply_final")
+    assert _check(ctx, "s0.apply_final").status == _S.DONE
+    ctx.answers = helpers.minimal_answers(
+        stage0_phase="final",
+        overrides={
+            paths.BOOTSTRAP: {"iam": {"roles/viewer": ["user:a@x.com"]}}
+        },
+    )
+    assert _check(ctx, "s0.apply_final").status == _S.PENDING
+    report = engine.run(ctx, [stage0.APPLY_FINAL], catalog=_STEPS)
+    assert (deploy_cmd.exit_code(report), report.stopped_at) == (
+        common.EXIT_STOPPED,
+        "s0.apply_final",
+    )
+    assert "s0.render" in (report.remedy or "")
 
 
 def test_stage1_apply_stops_on_environment_problems(tmp_path):
@@ -1117,7 +1152,11 @@ def test_stage1_apply_stops_on_environment_problems(tmp_path):
     runner = conftest.FakeTerraform()
     ctx = _ctx(tmp_path, runner=runner, environ={"CLOUDSDK_CONFIG": str(empty)})
     ctx.record(stage1.RENDER.id).status = _S.DONE
-    report = engine.run(ctx, [stage1.APPLY])
+    report = engine.run(
+        ctx,
+        [stage1.APPLY],
+        catalog=[stage1.BILLING_GRANT, stage1.PRECREATE_TENANTS],
+    )
     assert deploy_cmd.exit_code(report) == common.EXIT_STOPPED
     assert "CLOUDSDK_CONFIG" in (report.reason or "")
     assert runner.calls == []

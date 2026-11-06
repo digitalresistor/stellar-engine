@@ -766,6 +766,7 @@ APPLY_BOOTSTRAP = model.Step(
         "stage0_phase is bootstrap and the state has not moved to the "
         "bootstrap bucket"
     ),
+    requires=(RENDER.id, READY.id, APPLY_WORKLOAD.id, ALLOW_BQ.id),
     remedies=APPLY_REMEDIES,
 )
 REMOTE_PROVIDERS = model.Step(
@@ -842,7 +843,7 @@ APPLY_FINAL = model.Step(
     explain=_explain_apply_final,
     check=_check_apply_final,
     run=_run_apply_final,
-    requires=(PHASE_FINAL.id,),
+    requires=(RENDER.id, PHASE_FINAL.id),
     remedies=APPLY_REMEDIES,
 )
 VERIFY = model.Step(

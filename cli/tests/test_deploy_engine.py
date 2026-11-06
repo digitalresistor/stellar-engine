@@ -237,6 +237,25 @@ class TestRequires:
             == 0
         )
 
+    def test_transitive_requirements_stop_when_an_ancestor_lags(self, tmp_path):
+        first = Script([_S.PENDING])
+        second = Script([_S.DONE])
+        third = Script([_S.PENDING, _S.DONE])
+        steps = [
+            first.step("a.first"),
+            second.step("a.second", requires=("a.first",)),
+            third.step("a.third", requires=("a.second",)),
+        ]
+        report = engine.run(_ctx(tmp_path), [steps[2]], catalog=steps)
+        assert (deploy_cmd.exit_code(report), report.stopped_at) == (
+            common.EXIT_STOPPED,
+            "a.third",
+        )
+        assert "stellar deploy --only a.first --prefix tst" in (
+            report.remedy or ""
+        )
+        assert third.runs == 0
+
 
 class TestManual:
     def _step(self, verdicts=(_S.PENDING,), **fields):
