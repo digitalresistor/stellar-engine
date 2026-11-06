@@ -782,8 +782,8 @@ catalog order.
   the `pre.iam_roles` step, and allowing the BigQuery services on the
   workload folder in the `s0.allow_bq` step.
 - The `--yes` flag also enables a disabled API in the bootstrap project or
-  in a project whose ID starts with the prefix, while any other project
-  always asks first.
+  in a project that the deployment creates or imports, while any other
+  project always asks first.
 - The `s0.allow_bq` step lists every service that Assured Workloads allows
   along with BigQuery, and the `--yes` flag answers it only when each one
   is a BigQuery service.

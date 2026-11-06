@@ -324,6 +324,25 @@ def test_disabled_api():
     assert remedies.disabled_api("nothing") is None
 
 
+def test_disabled_api_does_not_cross_match_separate_error_blocks():
+    unrelated_consumer = (
+        'Error: Quota error\n  "consumer": "projects/wrong-project"\n'
+    )
+    second_error = _API_DISABLED.replace(
+        f'"consumer": "projects/{_PROJECT}",\n', ""
+    )
+    # Without consumer in the second block, it falls back to the console link
+    # of the second block instead of pairing wrong-project from the first.
+    assert remedies.disabled_api(unrelated_consumer + second_error) == (
+        "cloudkms.googleapis.com",
+        _PROJECT,
+    )
+    no_link = second_error.split("Enable it by visiting")[0] + (
+        '\n  "service": "cloudkms.googleapis.com"\n'
+    )
+    assert remedies.disabled_api(unrelated_consumer + no_link) is None
+
+
 def _action(key):
     action = remedies.REMEDIES[key].action
     assert action is not None
@@ -352,6 +371,17 @@ def test_yes_enables_an_api_of_a_deployment_project(tmp_path):
     assert helpers_deploy.asked(ctx) == []
     assert cloud.writes == [
         ("enable_services", "tst-prod-iac-core-0", ("cloudkms.googleapis.com",))
+    ]
+
+
+def test_yes_still_asks_before_enabling_on_unrelated_prefix_project(tmp_path):
+    cloud = conftest.FakeCloud()
+    ctx = helpers_deploy.scripted_ctx(tmp_path, [True], cloud=cloud, yes=True)
+    unrelated = "tst-legacy-shared-0"
+    output = _API_DISABLED.replace(_PROJECT, unrelated)
+    assert _action(remedies.API_DISABLED)(ctx, _failure(output))
+    assert helpers_deploy.asked(ctx) == [
+        f"Enable cloudkms.googleapis.com on project {unrelated}?"
     ]
 
 
