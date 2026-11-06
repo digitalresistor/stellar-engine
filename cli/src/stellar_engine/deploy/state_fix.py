@@ -33,6 +33,7 @@ from typing import Any
 
 from stellar_engine import fsutil
 from stellar_engine import naming
+from stellar_engine import paths
 from stellar_engine.deploy import model
 from stellar_engine.deploy import probe as probe_lib
 from stellar_engine.deploy import run_state as run_state_lib
@@ -80,6 +81,36 @@ class Bucket:
     import_id: str
 
 
+def _stage0_overrides(ctx: model.Context) -> Mapping[str, Any]:
+    """Returns the `0-bootstrap` variable overrides when mapped."""
+    raw = ctx.answers.overrides.get(paths.BOOTSTRAP)
+    return raw if isinstance(raw, Mapping) else {}
+
+
+def _logging_location(ctx: model.Context) -> str:
+    """Returns the Stage 0 log bucket location (`regions.primary`)."""
+    regions = _stage0_overrides(ctx).get("regions")
+    if isinstance(regions, Mapping):
+        primary = regions.get("primary")
+        if isinstance(primary, str) and primary:
+            return primary
+    return ctx.answers.region
+
+
+def _default_sinks(ctx: model.Context) -> list[str]:
+    """Returns the Stage 0 log sinks whose destination is a log bucket."""
+    overridden = _stage0_overrides(ctx).get("log_sinks")
+    if isinstance(overridden, Mapping):
+        return [
+            str(name)
+            for name, cfg in overridden.items()
+            if isinstance(cfg, Mapping) and cfg.get("type") == LOGGING_SINK_TYPE
+        ]
+    if ctx.answers.logging.sink_type != LOGGING_SINK_TYPE:
+        return []
+    return ctx.repo.log_sink_names()
+
+
 def log_buckets(
     ctx: model.Context, sinks: Iterable[str] | None = None
 ) -> list[Bucket]:
@@ -91,17 +122,15 @@ def log_buckets(
             every Stage 0 log sink when the sinks write to log buckets.
     """
     if sinks is None:
-        if ctx.answers.logging.sink_type != LOGGING_SINK_TYPE:
-            return []
-        sinks = ctx.repo.log_sink_names()
+        sinks = _default_sinks(ctx)
     project = naming.stage0_project_id(ctx.answers.prefix, LOGGING_PROJECT_NAME)
+    location = _logging_location(ctx)
     return [
         Bucket(
             sink=sink,
             address=f'{LOG_BUCKET_MODULE}["{sink}"].{LOG_BUCKET_RESOURCE}',
             import_id=(
-                f"projects/{project}/locations/{ctx.answers.region}/"
-                f"buckets/{sink}"
+                f"projects/{project}/locations/{location}/buckets/{sink}"
             ),
         )
         for sink in sinks
@@ -245,14 +274,21 @@ def fix_log_buckets(
     now = ctx.now()
     backup = runner_lib.state_backup_path(ctx.env.plans, step=STEP, now=now)
     fsutil.write_private_json(backup, before)
-    imported = _import_missing(ctx, tf, buckets, before)
-    doc = _pull(tf, ctx)
-    changed = rewrite_projects(doc, {bucket.address for bucket in buckets})
-    if changed:
-        _push_fixed(
-            ctx, tf, doc, runner_lib.fixed_state_path(ctx.env.plans, now=now)
-        )
-    ctx.invalidate()
+    imported, import_error = _import_missing(ctx, tf, buckets, before)
+    if import_error is not None and imported == 0:
+        raise import_error
+    try:
+        doc = _pull(tf, ctx)
+        changed = rewrite_projects(doc, {bucket.address for bucket in buckets})
+        if changed:
+            _push_fixed(
+                ctx,
+                tf,
+                doc,
+                runner_lib.fixed_state_path(ctx.env.plans, now=now),
+            )
+    finally:
+        ctx.invalidate()
     if step_id is not None:
         ctx.confirmed(
             step_id,
@@ -263,6 +299,8 @@ def fix_log_buckets(
             f"generation {generation} to {_generation(ctx)}",
         )
         ctx.save()
+    if import_error is not None:
+        raise import_error
     return bool(imported or changed)
 
 
@@ -271,16 +309,21 @@ def _import_missing(
     tf: runner_lib.Terraform,
     buckets: Sequence[Bucket],
     state: Mapping[str, Any],
-) -> int:
-    """Imports the buckets that a state lacks and returns how many."""
+) -> tuple[int, model.CommandError | None]:
+    """Imports the buckets that a state lacks; stops at the first failure."""
     present = {address for address, _ in probe_lib.instances(state)}
     missing = [bucket for bucket in buckets if bucket.address not in present]
+    imported = 0
     for bucket in missing:
         completed = tf.import_resource(
             ctx.workspace(_STAGE), bucket.address, bucket.import_id
         )
-        model.succeeded(completed, "import", log=tf.last_log)
-    return len(missing)
+        try:
+            model.succeeded(completed, "import", log=tf.last_log)
+        except model.CommandError as error:
+            return imported, error
+        imported += 1
+    return imported, None
 
 
 def _push_fixed(

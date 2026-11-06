@@ -24,6 +24,7 @@ Google API errors into the facade's error types.
 from concurrent import futures
 import functools
 import re
+import time
 
 from google.api_core import exceptions as api_exceptions
 import google.auth
@@ -68,6 +69,7 @@ _TEST_PERMISSIONS_BATCH = 100
 # The most services one batchEnable call accepts.
 _ENABLE_BATCH = 20
 _OPERATION_TIMEOUT_SECONDS = 600
+_POLL_INTERVAL_SECONDS = 2
 _REST_TIMEOUT_SECONDS = 30
 _MAX_WORKERS = 8
 # Conditional bindings need version 3 on both read and write.
@@ -700,6 +702,30 @@ class LiveCloudApi:
             request={"resource": resource, "policy": policy}
         )
 
+    def _wait_service_usage_operation(self, operation, description):
+        """Polls a Service Usage v1beta1 operation until `done` or timeout."""
+        name = operation.get("name")
+        if not operation.get("done") and isinstance(name, str) and name:
+            url = f"{_SERVICE_USAGE_BETA_URL}/{name.lstrip('/')}"
+            deadline = time.monotonic() + _OPERATION_TIMEOUT_SECONDS
+            while not operation.get("done"):
+                if time.monotonic() >= deadline:
+                    raise api.CloudError(
+                        f"{description} did not finish in "
+                        f"{_OPERATION_TIMEOUT_SECONDS} seconds."
+                    )
+                time.sleep(_POLL_INTERVAL_SECONDS)
+                operation = self._rest_call("GET", url)
+                if operation is None:
+                    raise api.CloudError(f"Operation {name} disappeared.")
+        error = operation.get("error")
+        if error:
+            detail = (
+                error.get("message") if isinstance(error, dict) else str(error)
+            )
+            raise api.CloudError(str(detail or f"{description} failed."))
+        return operation
+
     @_translated
     def generate_service_identity(self, project_id, service):
         """See `CloudWriter.generate_service_identity`."""
@@ -710,4 +736,8 @@ class LiveCloudApi:
         )
         if operation is None:
             raise api.CloudError(f"Project {project_id} does not exist.")
+        operation = self._wait_service_usage_operation(
+            operation,
+            f"Creating the {service} service identity on {project_id}",
+        )
         return (operation.get("response") or {}).get("email")

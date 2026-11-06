@@ -727,7 +727,7 @@ flag use.
 | `s1.billing_grant` | manual | Grants the Stage 1 service account billing access. |
 | `s1.precreate_tenants` | manual | Lists the tenant projects to pre-create and import. |
 | `s1.apply` | auto | Applies Stage 1. |
-| `s1.verify` | check | Checks the inputs of Stages 2 and 3. |
+| `s1.verify` | check | Checks the inputs of Stages 2 and 3 and the remote Stage 1 state. |
 
 - An `auto` step runs on its own.
 - A `manual` step waits for your confirmation.

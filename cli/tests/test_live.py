@@ -720,6 +720,70 @@ def test_generate_service_identity_pending_and_missing(monkeypatch):
         cloud.generate_service_identity("my-project", "x.com")
 
 
+def test_generate_service_identity_polls_until_done(monkeypatch):
+    cloud = live.LiveCloudApi()
+    agent = "service-1@gcp-sa-cloudkms.iam.gserviceaccount.com"
+    responses = iter(
+        [
+            {"name": "operations/cp.123", "done": False},
+            {"name": "operations/cp.123", "done": False},
+            {
+                "name": "operations/cp.123",
+                "done": True,
+                "response": {"email": agent},
+            },
+        ]
+    )
+    calls = []
+
+    def call(method, url, params=None, body=None):
+        calls.append((method, url, body))
+        return next(responses)
+
+    monkeypatch.setattr(cloud, "_rest_call", call)
+    monkeypatch.setattr(live.time, "sleep", lambda _: None)
+    found = cloud.generate_service_identity(
+        "my-project", "cloudkms.googleapis.com"
+    )
+    assert found == agent
+    op_url = "https://serviceusage.googleapis.com/v1beta1/operations/cp.123"
+    assert calls == [
+        (
+            "POST",
+            "https://serviceusage.googleapis.com/v1beta1/projects/my-project"
+            "/services/cloudkms.googleapis.com:generateServiceIdentity",
+            None,
+        ),
+        ("GET", op_url, None),
+        ("GET", op_url, None),
+    ]
+
+
+def test_generate_service_identity_operation_errors(monkeypatch):
+    cloud = live.LiveCloudApi()
+    monkeypatch.setattr(live.time, "sleep", lambda _: None)
+    _rest_calls(
+        monkeypatch,
+        cloud,
+        {"done": True, "error": {"code": 7, "message": "Permission denied"}},
+    )
+    with pytest.raises(api.CloudError, match="Permission denied"):
+        cloud.generate_service_identity("my-project", "x.com")
+
+    responses = iter([{"name": "operations/cp.1", "done": False}, None])
+    monkeypatch.setattr(
+        cloud, "_rest_call", lambda *args, **kwargs: next(responses)
+    )
+    with pytest.raises(api.CloudError, match="disappeared"):
+        cloud.generate_service_identity("my-project", "x.com")
+
+    ticks = iter([0.0, 601.0])
+    monkeypatch.setattr(live.time, "monotonic", lambda: next(ticks))
+    _rest_calls(monkeypatch, cloud, {"name": "operations/cp.2", "done": False})
+    with pytest.raises(api.CloudError, match="did not finish in 600 seconds"):
+        cloud.generate_service_identity("my-project", "x.com")
+
+
 class _Blob:
     def __init__(self, data, generation, error=None):
         self.data = data

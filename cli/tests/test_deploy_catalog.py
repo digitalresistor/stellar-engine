@@ -1197,6 +1197,31 @@ def test_stage1_verify_needs_the_stage2_inputs(tmp_path):
     assert _check(ctx, "s1.verify").status == _S.PENDING
     for name in workspace_lib.RESMAN_OUTPUTS:
         _write(ctx.env.fast_config / name, "{}")
+    key = ("tst-prod-iac-core-resman-0", probe_lib.REMOTE_OBJECT)
+    verdict = _check(ctx, "s1.verify")
+    assert verdict.status == _S.PENDING
+    assert "does not exist" in verdict.detail
+    _fake(ctx).objects[key] = api.ObjectData(b"{}", 1)
+    verdict = _check(ctx, "s1.verify")
+    assert verdict.status == _S.PENDING
+    assert "holds no Stage 1 resources" in verdict.detail
+    _fake(ctx).objects[key] = api.ObjectData(b"{bad", 1)
+    assert _check(ctx, "s1.verify").status == _S.UNKNOWN
+    _fake(ctx).objects[key] = api.AccessDeniedError("denied")
+    assert _check(ctx, "s1.verify").status == _S.UNKNOWN
+    state = helpers_deploy.state_doc(
+        [
+            helpers_deploy.resource(
+                None,
+                "google_folder",
+                "env",
+                [helpers_deploy.instance({"name": "folders/1"})],
+            )
+        ]
+    )
+    _fake(ctx).objects[key] = api.ObjectData(
+        helpers_deploy.state_bytes(state), 2
+    )
     assert _check(ctx, "s1.verify").status == _S.DONE
 
 
