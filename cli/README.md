@@ -983,8 +983,8 @@ under the `iam-snapshots/` folder.
   again when someone changed the policy in the meantime.
 - A policy that changes three times during the review stops the deploy, so
   you can find out who edits it before you rerun the deploy.
-- A role whose member list grows in the answers loses the comments inside
-  that list, while new roles keep every comment.
+- A role whose member list changes in the answers loses the comments
+  inside that list, while comments after the list and on other roles stay.
 
 ### 11.2 IAM commands
 
