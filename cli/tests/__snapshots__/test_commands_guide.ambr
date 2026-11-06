@@ -9,6 +9,7 @@
       Applies here: no Stage 0 apply has created resources yet.
    3. pre.org_policies  auto  Record the existing organization policies
       Records the existing organization policies that Stage 0 declares in the existing_org_policies answer, so the final Stage 0 apply imports them instead of failing to create them. It replaces fast/stages-aw/0-bootstrap/import.sh and only reads Google Cloud. Fallback: stellar imports scan.
+      Applies here: Stage 0 manages organization policies without import_defaults.
    4. pre.preflight  check  Preflight checks
       Runs every stellar preflight check against the answers and stops at a failed check. Warnings and manual confirmations pass, so review them in the preflight report. Fallback: stellar preflight prints the same checks as a table.
       Applies here: no Stage 0 apply has created resources yet.

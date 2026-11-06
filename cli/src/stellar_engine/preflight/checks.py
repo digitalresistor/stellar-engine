@@ -312,8 +312,11 @@ def bootstrap_user(ctx):
     """Returns the user that the first Stage 0 apply grants as bootstrap_user.
 
     The operator can name any user account. Without one, the Application
-    Default Credentials identity serves when it is a user account.
+    Default Credentials identity serves when it is a user account. In the
+    final Stage 0 phase, `bootstrap_user` is no longer granted.
     """
+    if ctx.inputs.stage0_phase == "final":
+        return None
     if ctx.inputs.bootstrap_user:
         return ctx.inputs.bootstrap_user
     principal = ctx.principal
@@ -349,6 +352,15 @@ def _bootstrap_user_result(ctx):
                 "`bootstrap_user` as a `user:` principal."
             ),
             remedy="Pass --bootstrap-user with a user account email.",
+            **common,
+        )
+    if ctx.inputs.stage0_phase == "final":
+        return CheckResult(
+            status=Status.PASS,
+            detail=(
+                "stage0_phase is final, so Stage 0 no longer grants "
+                f"`bootstrap_user`.{runs_as}"
+            ),
             **common,
         )
     user = bootstrap_user(ctx)
@@ -1574,12 +1586,24 @@ def _folder_result(ctx, prefix):
     )
 
 
+def _org_resource(ctx, key: str) -> bool:
+    """Returns whether Stage 0 deploys an organization-level resource group."""
+    return ctx.inputs.stage0_org_resources.get(key, True)
+
+
 def _iam_target(ctx):
-    """Returns what the first Stage 0 apply sets on organization IAM.
+    """Returns what the Stage 0 apply sets on organization IAM.
 
     Preflight cannot plan, so the target comes from the repository, the
     inputs that name each holder, and the Stage 0 IAM overrides.
     """
+    audit_configs = (
+        iam_diff.stage0_audit_configs(ctx.repo)
+        if _org_resource(ctx, "audit_config")
+        else None
+    )
+    if not _org_resource(ctx, "iam"):
+        return iam_diff.Target(audit_configs=dict(audit_configs or {}))
     groups = _group_members(ctx)
     user = bootstrap_user(ctx)
 
@@ -1596,7 +1620,7 @@ def _iam_target(ctx):
         ctx.repo,
         resolve,
         ctx.inputs.stage0_iam_overrides,
-        audit_configs=iam_diff.stage0_audit_configs(ctx.repo),
+        audit_configs=audit_configs,
     )
 
 
@@ -1631,6 +1655,15 @@ def _iam_result(ctx, org_id):
     list stay, so they count as kept, not removed.
     """
     check_id, title = "shared.iam", "Authoritative IAM roles"
+    if not _org_resource(ctx, "iam") and not _org_resource(ctx, "audit_config"):
+        return CheckResult(
+            check_id,
+            Category.SHARED_ORG,
+            title,
+            Status.PASS,
+            f"overrides.{paths.BOOTSTRAP}.deploy_org_resources disables "
+            "organization IAM and audit log configs.",
+        )
     try:
         live = ctx.cloud.get_org_iam_policy(org_id)
     except api.CloudError as error:
@@ -1657,6 +1690,30 @@ def _iam_result(ctx, org_id):
     )
 
 
+def _existing_org_resources(ctx, org_id):
+    """Lists existing org-wide resources among those Stage 0 enables."""
+    existing = []
+    if _org_resource(ctx, "custom_roles"):
+        existing += [
+            f"custom role {role_id}"
+            for role_id in ctx.repo.custom_role_ids()
+            if ctx.cloud.custom_role_exists(org_id, role_id)
+        ]
+    if _org_resource(ctx, "org_policies"):
+        existing += [
+            f"custom constraint {name}"
+            for name in ctx.repo.custom_constraint_names()
+            if ctx.cloud.custom_constraint_exists(org_id, name)
+        ]
+    if _org_resource(ctx, "logging_sinks"):
+        existing += [
+            f"log sink {name}"
+            for name in ctx.repo.log_sink_names()
+            if ctx.cloud.log_sink_exists(org_id, name)
+        ]
+    return existing
+
+
 def check_shared_org(ctx):
     """Flags org-wide resources and IAM grants that Stage 0 would change."""
     category = Category.SHARED_ORG
@@ -1665,21 +1722,7 @@ def check_shared_org(ctx):
     org_id = ctx.org.org_id
     results = []
     try:
-        existing = [
-            f"custom role {role_id}"
-            for role_id in ctx.repo.custom_role_ids()
-            if ctx.cloud.custom_role_exists(org_id, role_id)
-        ]
-        existing += [
-            f"custom constraint {name}"
-            for name in ctx.repo.custom_constraint_names()
-            if ctx.cloud.custom_constraint_exists(org_id, name)
-        ]
-        existing += [
-            f"log sink {name}"
-            for name in ctx.repo.log_sink_names()
-            if ctx.cloud.log_sink_exists(org_id, name)
-        ]
+        existing = _existing_org_resources(ctx, org_id)
     except api.CloudError as error:
         results.append(
             CheckResult(
@@ -1721,6 +1764,22 @@ def _policies(names):
     return f"{len(names)} existing organization {noun}"
 
 
+def _org_policy_override_detail(ctx) -> str | None:
+    """Returns why `existing_org_policies` does not apply, or None."""
+    if not _org_resource(ctx, "org_policies"):
+        return (
+            f"overrides.{paths.BOOTSTRAP}.deploy_org_resources.org_policies "
+            "is false, so Stage 0 manages no organization policies."
+        )
+    if ctx.inputs.stage0_import_defaults:
+        return (
+            f"overrides.{paths.BOOTSTRAP}.org_policies_config.import_defaults "
+            "is true, so Stage 0 imports its default policy list instead of "
+            "existing_org_policies."
+        )
+    return None
+
+
 def _org_policy_result(ctx, org_id):
     """Checks that answers.yaml lists the policies Stage 0 must import.
 
@@ -1731,6 +1790,11 @@ def _org_policy_result(ctx, org_id):
     """
     check_id = "shared.org_policies"
     title = "Existing organization policies"
+    override_detail = _org_policy_override_detail(ctx)
+    if override_detail is not None:
+        return CheckResult(
+            check_id, Category.SHARED_ORG, title, Status.PASS, override_detail
+        )
     try:
         existing = ctx.cloud.list_org_policies(org_id)
     except api.CloudError as error:

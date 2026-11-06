@@ -1375,6 +1375,80 @@ class TestSharedOrg:
         found = statuses(checks.check_shared_org(make_ctx()))
         assert found == {"shared": Status.SKIP}
 
+    def test_final_phase_drops_bootstrap_user_from_iam_target(
+        self, make_ctx, cloud
+    ):
+        cloud.policy = iam_policy((ORG_ADMIN, (f"user:{conftest.USER}",)))
+        ctx = resolved(
+            make_ctx, bootstrap_user=conftest.USER, stage0_phase="final"
+        )
+        checks.check_identity(ctx)
+        iam = by_id(checks.check_shared_org(ctx))["shared.iam"]
+        assert iam.status == Status.WARN
+        assert conftest.USER in iam.detail
+
+    def test_disabled_org_resources_skip_disabled_checks(self, make_ctx, cloud):
+        cloud.custom_roles = {"tagViewer"}
+        cloud.constraints = {"custom.kmsRotation"}
+        cloud.sinks = {"audit-logs"}
+        cloud.org_policies = api.AccessDeniedError("must not list org policies")
+        cloud.policy = api.AccessDeniedError("must not read org IAM")
+        ctx = resolved(
+            make_ctx,
+            stage0_org_resources={
+                "audit_config": False,
+                "custom_roles": False,
+                "iam": False,
+                "logging_sinks": False,
+                "org_policies": False,
+            },
+        )
+        found = by_id(checks.check_shared_org(ctx))
+        assert statuses(found.values()) == {
+            "shared.resources": Status.PASS,
+            "shared.org_policies": Status.PASS,
+            "shared.iam": Status.PASS,
+        }
+
+    def test_disabled_iam_still_checks_audit_configs(self, make_ctx, cloud):
+        cloud.policy = iam_policy(
+            (ORG_ADMIN, ("user:foreign@example.com",)),
+            audit_configs=[
+                {
+                    "service": "allServices",
+                    "auditLogConfigs": [{"logType": "DATA_READ"}],
+                }
+            ],
+        )
+        ctx = resolved(make_ctx, stage0_org_resources={"iam": False})
+        iam = by_id(checks.check_shared_org(ctx))["shared.iam"]
+        assert iam.status == Status.WARN
+        assert "foreign@example.com" not in iam.detail
+        assert "replaces the existing allServices audit log" in iam.detail
+
+    def test_import_defaults_passes_without_existing_org_policies(
+        self, make_ctx, cloud
+    ):
+        cloud.org_policies = api.AccessDeniedError("must not list org policies")
+        ctx = resolved(
+            make_ctx, existing_org_policies=(), stage0_import_defaults=True
+        )
+        result = by_id(checks.check_shared_org(ctx))["shared.org_policies"]
+        assert result.status == Status.PASS
+        assert "import_defaults is true" in result.detail
+
+    def test_domainless_org_omits_browser_role(self, make_ctx, cloud):
+        cloud.orgs = [
+            api.Organization(conftest.ORG_ID, "", conftest.CUSTOMER_ID)
+        ]
+        cloud.policy = iam_policy(
+            ("roles/browser", ("user:someone@example.com",))
+        )
+        ctx = resolved(make_ctx, domain=None)
+        iam = by_id(checks.check_shared_org(ctx))["shared.iam"]
+        assert iam.status == Status.PASS
+        assert "someone@example.com" not in iam.detail
+
 
 def test_role_lookup_error_is_reported(make_ctx, cloud):
     def broken(full_resource_name):

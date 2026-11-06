@@ -807,9 +807,23 @@ class TestTargetFromRepo:
     def test_unresolved_holders_stay_out(self, repo):
         target = iam_diff.target_from_repo(repo, lambda holder: None, {})
         assert set(target.bindings) == {
-            iam_diff.BindingKey(role) for role in repo.authoritative_bindings()
+            iam_diff.BindingKey(role)
+            for role in repo.authoritative_bindings()
+            if role != "roles/browser"
         }
         assert all(not members for members in target.bindings.values())
+        with_domain = iam_diff.target_from_repo(
+            repo,
+            lambda holder: (
+                "domain:example.com"
+                if holder.kind == repo_lib.HolderKind.DOMAIN
+                else None
+            ),
+            {},
+        )
+        assert with_domain.bindings[iam_diff.BindingKey("roles/browser")] == {
+            "domain:example.com"
+        }
 
     def test_stage0_audit_configs(self, repo):
         configs = iam_diff.stage0_audit_configs(repo)

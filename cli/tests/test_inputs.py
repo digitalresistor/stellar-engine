@@ -180,17 +180,28 @@ def test_answers_fill_unset_fields(answers):
 def test_answers_pass_the_stage0_iam_overrides(answers):
     overridden = answers.model_copy(
         update={
+            "stage0_phase": "final",
             "overrides": {
                 "0-bootstrap": {
-                    "iam": {"roles/browser": ["user:a@example.com"]}
+                    "iam": {"roles/browser": ["user:a@example.com"]},
+                    "deploy_org_resources": {
+                        "iam": False,
+                        "org_policies": False,
+                    },
+                    "org_policies_config": {"import_defaults": True},
                 }
-            }
+            },
         }
     )
     resolved = inputs.resolve({}, None, answers_lib.to_preflight(overridden))
+    assert resolved.stage0_phase == "final"
     assert resolved.stage0_iam_overrides == {
         "iam": {"roles/browser": ("user:a@example.com",)}
     }
+    assert resolved.stage0_org_resources["iam"] is False
+    assert resolved.stage0_org_resources["org_policies"] is False
+    assert resolved.stage0_org_resources["audit_config"] is True
+    assert resolved.stage0_import_defaults is True
 
 
 def test_answers_pass_an_explicit_compliance_location(answers):

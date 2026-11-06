@@ -55,6 +55,16 @@ _TENANT_KEY = "TENANT_NAME"
 
 # Stage 0 overrides that keep or add grants on authoritative roles.
 _STAGE0_IAM_OVERRIDES = ("iam", "iam_by_principals")
+# Keys of `0-bootstrap` `var.deploy_org_resources`, which all default to true.
+_STAGE0_ORG_RESOURCES = (
+    "audit_config",
+    "custom_roles",
+    "iam",
+    "logging_settings",
+    "logging_sinks",
+    "org_policies",
+    "workforce_identity_pool",
+)
 
 
 # Slots of a ruamel map entry comment: the comment lines before the key,
@@ -654,6 +664,36 @@ def stage0_iam_overrides(
     return found
 
 
+def stage0_org_resources(answers: models.Answers) -> dict[str, bool]:
+    """Returns the effective `deploy_org_resources` flags of Stage 0.
+
+    Every flag defaults to True, matching `0-bootstrap/variables.tf`.
+    Non-boolean entries stay out rather than failing preflight.
+
+    Args:
+        answers: The environment answers.
+
+    Returns:
+        Each `deploy_org_resources` key to its effective boolean.
+    """
+    found: dict[str, bool] = dict.fromkeys(_STAGE0_ORG_RESOURCES, True)
+    raw = answers.overrides.get(paths.BOOTSTRAP, {}).get("deploy_org_resources")
+    if isinstance(raw, dict):
+        for key in _STAGE0_ORG_RESOURCES:
+            value = raw.get(key)
+            if isinstance(value, bool):
+                found[key] = value
+    return found
+
+
+def stage0_import_defaults(answers: models.Answers) -> bool:
+    """Returns whether `org_policies_config.import_defaults` is true."""
+    config = answers.overrides.get(paths.BOOTSTRAP, {}).get(
+        "org_policies_config"
+    )
+    return isinstance(config, dict) and config.get("import_defaults") is True
+
+
 def to_preflight(answers: models.Answers) -> dict:
     """Returns the PreflightInputs field values the answers define.
 
@@ -693,6 +733,7 @@ def to_preflight(answers: models.Answers) -> dict:
         "domain": answers.organization.domain,
         "customer_id": answers.organization.customer_id,
         "bootstrap_user": answers.bootstrap_user,
+        "stage0_phase": answers.stage0_phase,
         "groups": dict(answers.groups),
         "tenant_project_ids": tuple(tenant_ids),
         "imported_project_ids": tuple(imported),
@@ -705,5 +746,7 @@ def to_preflight(answers: models.Answers) -> dict:
         "billing_budget": answers.budget.amount is not None,
         "existing_org_policies": tuple(answers.existing_org_policies),
         "stage0_iam_overrides": stage0_iam_overrides(answers),
+        "stage0_org_resources": stage0_org_resources(answers),
+        "stage0_import_defaults": stage0_import_defaults(answers),
     }
     return {key: value for key, value in values.items() if value is not None}

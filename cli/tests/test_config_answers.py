@@ -751,6 +751,7 @@ def test_to_preflight():
         "domain": conftest.DOMAIN,
         "customer_id": conftest.CUSTOMER_ID,
         "bootstrap_user": conftest.USER,
+        "stage0_phase": "bootstrap",
         "groups": {"gcp-devops": "platform"},
         "tenant_project_ids": (
             "tst-prod-ten1-iac-core-0",
@@ -769,6 +770,16 @@ def test_to_preflight():
         "billing_budget": False,
         "existing_org_policies": ("iam.allowedPolicyMemberDomains",),
         "stage0_iam_overrides": {},
+        "stage0_org_resources": {
+            "audit_config": True,
+            "custom_roles": True,
+            "iam": True,
+            "logging_settings": True,
+            "logging_sinks": True,
+            "org_policies": True,
+            "workforce_identity_pool": True,
+        },
+        "stage0_import_defaults": False,
     }
 
 

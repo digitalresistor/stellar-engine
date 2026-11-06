@@ -396,6 +396,27 @@ def test_org_policies_in_the_state_count_as_recorded(tmp_path, repo):
     assert _check(ctx, "pre.org_policies").status == _S.DONE
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"deploy_org_resources": {"org_policies": False}},
+        {"org_policies_config": {"import_defaults": True}},
+    ],
+)
+def test_org_policies_skip_when_disabled_or_import_defaults(tmp_path, override):
+    cloud = conftest.FakeCloud(
+        org_policies=api.AccessDeniedError("must not list org policies")
+    )
+    ctx = _ctx(
+        tmp_path,
+        cloud=cloud,
+        answers=helpers.minimal_answers(overrides={"0-bootstrap": override}),
+    )
+    assert not engine.applies(ctx, pre.ORG_POLICIES)
+    report = engine.run(ctx, [pre.ORG_POLICIES])
+    assert report.results[0].status == _S.NOT_APPLICABLE
+
+
 def test_preflight_fails_on_a_failed_check(tmp_path):
     assert _check(_ctx(tmp_path), "pre.preflight").status == _S.DONE
     cloud = conftest.FakeCloud(projects={})

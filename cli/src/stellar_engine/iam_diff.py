@@ -662,6 +662,11 @@ def stage0_audit_configs(repo: repo_lib.Repo) -> dict[str, AuditConfigs]:
     }
 
 
+_OPTIONAL_HOLDERS = frozenset(
+    {repo_lib.HolderKind.DOMAIN, repo_lib.HolderKind.BOOTSTRAP_USER}
+)
+
+
 def target_from_repo(
     repo: repo_lib.Repo,
     resolve: Callable[[repo_lib.Holder], str | None],
@@ -691,8 +696,14 @@ def target_from_repo(
     """
     bindings: dict[BindingKey, set[str]] = {}
     for role, holders in repo.authoritative_bindings().items():
-        members = bindings.setdefault(BindingKey(role), set())
-        members.update(m for m in map(resolve, holders) if m is not None)
+        resolved = {m for m in map(resolve, holders) if m is not None}
+        if (
+            holders
+            and not resolved
+            and all(holder.kind in _OPTIONAL_HOLDERS for holder in holders)
+        ):
+            continue
+        bindings.setdefault(BindingKey(role), set()).update(resolved)
     for role, members in (stage0_overrides.get("iam") or {}).items():
         bindings.setdefault(BindingKey(role), set()).update(members)
     by_principals = stage0_overrides.get("iam_by_principals") or {}

@@ -247,9 +247,25 @@ def _emit_overrides(
     `iam_diff_lib.keep_in_overrides`. The Stage 0 roles come from the target
     that preflight builds, whose members do not matter here.
     """
+    if not answers_lib.stage0_org_resources(answers)["iam"]:
+        typer.echo(
+            f"overrides.{paths.BOOTSTRAP}.deploy_org_resources.iam is false, "
+            "so Stage 0 manages no organization IAM bindings."
+        )
+        return
     target = iam_diff_lib.target_from_repo(
         session.repo,
-        lambda holder: None,
+        functools.partial(
+            iam_diff_lib.resolve_holder,
+            prefix=answers.prefix,
+            groups={},
+            bootstrap_user=(
+                answers.bootstrap_user
+                if answers.stage0_phase == models.STAGE0_BOOTSTRAP
+                else None
+            ),
+            domain=answers.organization.domain,
+        ),
         answers_lib.stage0_iam_overrides(answers),
     )
     roles = {key.role for key in target.bindings}

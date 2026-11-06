@@ -22,7 +22,7 @@ already have. Flags always win.
 
 from collections.abc import Mapping
 import pathlib
-from typing import Any
+from typing import Any, Literal
 
 import dotenv
 import pydantic
@@ -71,6 +71,7 @@ class PreflightInputs(pydantic.BaseModel):
     bootstrap_user: str | None = pydantic.Field(
         default=None, pattern=patterns.EMAIL
     )
+    stage0_phase: Literal["bootstrap", "final"] = "bootstrap"
     groups: dict[str, str] = pydantic.Field(default_factory=dict)
     redeploy: bool = False
     # Stage 1 tenant project IDs, which only answers.yaml defines.
@@ -97,6 +98,10 @@ class PreflightInputs(pydantic.BaseModel):
     stage0_iam_overrides: dict[str, dict[str, tuple[str, ...]]] = (
         pydantic.Field(default_factory=dict)
     )
+    # Effective `deploy_org_resources` flags and `import_defaults` from
+    # `overrides.0-bootstrap` in answers.yaml.
+    stage0_org_resources: dict[str, bool] = pydantic.Field(default_factory=dict)
+    stage0_import_defaults: bool = False
 
 
 def read_config_env(path):

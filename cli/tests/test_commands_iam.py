@@ -341,3 +341,25 @@ def test_restore_emits_overrides_for_stage0_roles(
     answers = helpers.load_answers(isolated_home)
     assert answers.overrides["0-bootstrap"]["iam"] == {_STAGE0_ROLE: [_OLD]}
     assert not cloud_env.writes
+
+
+def test_restore_emit_overrides_skips_when_org_iam_is_disabled(
+    cli_runner, isolated_home, cloud_env
+):
+    path = _snapshot(cli_runner, isolated_home)
+    assert (
+        helpers.invoke(
+            cli_runner,
+            "init",
+            "--non-interactive",
+            "--set",
+            "overrides.0-bootstrap.deploy_org_resources.iam=false",
+        ).exit_code
+        == 0
+    )
+    cloud_env.policy = _policy({_STAGE0_ROLE: [_NEW]})
+    outcome = _iam(cli_runner, "restore", str(path), "--emit-overrides")
+    assert outcome.exit_code == 0, outcome.output
+    assert "deploy_org_resources.iam is false" in outcome.output
+    answers = helpers.load_answers(isolated_home)
+    assert "iam" not in answers.overrides["0-bootstrap"]
