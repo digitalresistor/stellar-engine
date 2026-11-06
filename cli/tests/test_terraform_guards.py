@@ -274,6 +274,17 @@ def test_targeted_scope_blocks_a_sibling_module(repo):
     assert _keys(guards.blocks(findings)) == [(BLOCK, guards.TARGETED_SCOPE)]
 
 
+@pytest.mark.parametrize("address", sorted(guards.ORG_LOGGING_SETTINGS))
+def test_targeted_scope_accepts_indexed_and_legacy_logging_settings(
+    repo, address
+):
+    change = _change(
+        address, "google_logging_organization_settings", ["create"]
+    )
+    findings = _evaluate(_synthetic(change), repo, targeted_to=WORKLOAD)
+    assert _keys(findings) == [(INFO, guards.TARGETED_SCOPE)]
+
+
 _MEMBER = {"role": "roles/iam.organizationRoleAdmin", "member": "user:b@x.com"}
 
 

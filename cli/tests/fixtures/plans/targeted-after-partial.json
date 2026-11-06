@@ -14,8 +14,8 @@
   },
   "resource_drift": [
     {
-      "address": "module.organization-logging.google_logging_organization_settings.default[0]",
-      "module_address": "module.organization-logging",
+      "address": "module.organization-logging[0].google_logging_organization_settings.default[0]",
+      "module_address": "module.organization-logging[0]",
       "mode": "managed",
       "type": "google_logging_organization_settings",
       "name": "default",
@@ -45,8 +45,8 @@
   ],
   "resource_changes": [
     {
-      "address": "module.organization-logging.google_logging_organization_settings.default[0]",
-      "module_address": "module.organization-logging",
+      "address": "module.organization-logging[0].google_logging_organization_settings.default[0]",
+      "module_address": "module.organization-logging[0]",
       "mode": "managed",
       "type": "google_logging_organization_settings",
       "name": "default",
